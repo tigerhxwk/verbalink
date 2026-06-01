@@ -893,6 +893,7 @@ function updateActive(t) {
 
 // ── Transcript scroller ─────────────────────────────────────────────────────
 let _transcriptCollapsed = localStorage.getItem('transcript_collapsed') === '1';
+let _blurUnread = localStorage.getItem('blur_unread') === '1';
 
 function renderTranscriptScroller() {
   const scroll = $('transcript-scroll');
@@ -925,23 +926,29 @@ function renderTranscriptScroller() {
     row.appendChild(rew);
     scroll.appendChild(row);
   });
+  applyBlurUnread();
   highlightTranscript(S.activeIdx);
 }
 
 function highlightTranscript(idx) {
   const scroll = $('transcript-scroll');
   if (!scroll || _transcriptCollapsed) return;
-  const prev = scroll.querySelector('.tr-line.active');
-  if (prev) prev.classList.remove('active');
+  scroll.querySelectorAll('.tr-line').forEach(el => {
+    const i = +el.dataset.i;
+    el.classList.toggle('active', i === idx);
+    el.classList.toggle('unread', idx >= 0 && i > idx);  // everything after current = upcoming
+  });
   const row = scroll.querySelector(`.tr-line[data-i="${idx}"]`);
-  if (row) {
-    row.classList.add('active');
-    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }
+  if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 function applyTranscriptCollapsed() {
   $('pf-transcript-view').classList.toggle('collapsed', _transcriptCollapsed);
+}
+
+function applyBlurUnread() {
+  $('transcript-scroll').classList.toggle('blur-unread', _blurUnread);
+  $('transcript-blur-btn').classList.toggle('active', _blurUnread);
 }
 
 $('transcript-toggle-btn').addEventListener('click', () => {
@@ -949,7 +956,28 @@ $('transcript-toggle-btn').addEventListener('click', () => {
   localStorage.setItem('transcript_collapsed', _transcriptCollapsed ? '1' : '0');
   applyTranscriptCollapsed();
   if (!_transcriptCollapsed) highlightTranscript(S.activeIdx);
+  saveUserSetting({ transcript_collapsed: _transcriptCollapsed });
 });
+
+$('transcript-blur-btn').addEventListener('click', () => {
+  _blurUnread = !_blurUnread;
+  localStorage.setItem('blur_unread', _blurUnread ? '1' : '0');
+  applyBlurUnread();
+  saveUserSetting({ blur_unread: _blurUnread });
+});
+
+// Debounced PUT of a single user setting to the DB (per-account persistence)
+let _settingsPutTimer = null;
+let _settingsPutPending = {};
+function saveUserSetting(patch) {
+  _settingsPutPending = { ..._settingsPutPending, ...patch };
+  _userSettings = { ..._userSettings, ...patch };
+  clearTimeout(_settingsPutTimer);
+  _settingsPutTimer = setTimeout(async () => {
+    const body = _settingsPutPending; _settingsPutPending = {};
+    try { await api('PUT', '/api/settings', body); } catch {}
+  }, 400);
+}
 
 // Clarify a specific sentence object (used by the scroller rows)
 function analyzeSentenceFor(seg) {
@@ -1039,6 +1067,10 @@ function playB64Audio(b64, source) {
   if (_ttsSource === source && _ttsAudio && !_ttsAudio.paused) { stopTts(); return; }
   stopTts();
   if (!b64) return;
+  // TTS and book audio are mutually exclusive — pause the book (and cancel any
+  // auto-resume countdown) so they never overlap.
+  clearAutoResume();
+  audioEl.pause();
   const url = URL.createObjectURL(b64Blob(b64, 'audio/wav'));
   _ttsAudio = new Audio(url);
   _ttsSource = source;
@@ -1464,6 +1496,13 @@ async function loadUserSettings() {
     $('settings-essay-enabled').checked = !!_userSettings.essay_enabled;
     $('settings-essay-interval').value  = String(_userSettings.essay_interval_min || 30);
     $('settings-interval-row').style.opacity = _userSettings.essay_enabled ? '1' : '0.4';
+    // UI prefs follow the user account (DB is source of truth; localStorage is just a cache)
+    _blurUnread = !!_userSettings.blur_unread;
+    _transcriptCollapsed = !!_userSettings.transcript_collapsed;
+    localStorage.setItem('blur_unread', _blurUnread ? '1' : '0');
+    localStorage.setItem('transcript_collapsed', _transcriptCollapsed ? '1' : '0');
+    applyBlurUnread();
+    applyTranscriptCollapsed();
   } catch {}
 }
 

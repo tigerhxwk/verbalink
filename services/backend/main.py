@@ -180,6 +180,8 @@ def init_db():
         "ALTER TABLE books ADD COLUMN playback_speed REAL DEFAULT 1.0",
         "ALTER TABLE books ADD COLUMN volume REAL DEFAULT 1.0",
         "ALTER TABLE books ADD COLUMN clarify_mode TEXT DEFAULT 'advanced'",
+        "ALTER TABLE user_settings ADD COLUMN blur_unread INTEGER DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN transcript_collapsed INTEGER DEFAULT 0",
     ]:
         try:
             conn.execute(migration)
@@ -1410,8 +1412,10 @@ async def clear_chat(book_id: str, user: dict = Depends(current_user)):
 # ── User settings ──────────────────────────────────────────────────────────────
 
 class UserSettingsBody(BaseModel):
-    essay_enabled:      Optional[bool] = None
-    essay_interval_min: Optional[int]  = None
+    essay_enabled:        Optional[bool] = None
+    essay_interval_min:   Optional[int]  = None
+    blur_unread:          Optional[bool] = None
+    transcript_collapsed: Optional[bool] = None
 
 
 @app.get("/api/settings")
@@ -1419,9 +1423,16 @@ async def get_settings(user: dict = Depends(current_user)):
     conn = get_db()
     row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user["id"],)).fetchone()
     conn.close()
+    defaults = {"essay_enabled": True, "essay_interval_min": 30,
+                "blur_unread": False, "transcript_collapsed": False}
     if not row:
-        return {"essay_enabled": True, "essay_interval_min": 30}
-    return dict(row)
+        return defaults
+    d = dict(row)
+    # Normalize integer-bool columns to real bools for the frontend
+    for k in ("essay_enabled", "blur_unread", "transcript_collapsed"):
+        if k in d and d[k] is not None:
+            d[k] = bool(d[k])
+    return {**defaults, **d}
 
 
 @app.put("/api/settings")
@@ -1435,6 +1446,10 @@ async def save_settings(body: UserSettingsBody, user: dict = Depends(current_use
         fields.append("essay_enabled=?"); values.append(int(body.essay_enabled))
     if body.essay_interval_min is not None:
         fields.append("essay_interval_min=?"); values.append(max(5, body.essay_interval_min))
+    if body.blur_unread is not None:
+        fields.append("blur_unread=?"); values.append(int(body.blur_unread))
+    if body.transcript_collapsed is not None:
+        fields.append("transcript_collapsed=?"); values.append(int(body.transcript_collapsed))
     if fields:
         values.append(user["id"])
         conn.execute(f"UPDATE user_settings SET {', '.join(fields)} WHERE user_id=?", values)

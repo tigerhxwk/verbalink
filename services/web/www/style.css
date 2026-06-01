@@ -889,6 +889,24 @@ select:focus { border-color: var(--blue); }
 .pf-transcript-view.collapsed .pf-transcript-toggle { transform: rotate(-90deg); }
 .pf-transcript-view.collapsed .pf-transcript-scroll { display: none; }
 
+.pf-transcript-actions { display: flex; align-items: center; gap: 4px; }
+.pf-transcript-blur {
+  width: 28px; height: 28px; border-radius: 6px;
+  color: var(--text-3);
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.pf-transcript-blur:hover { background: var(--surface-3); color: var(--text); }
+.pf-transcript-blur.active { color: var(--amber); }
+
+/* Blur upcoming (unread) lines to avoid spoilers; reveal on hover. */
+.pf-transcript-scroll.blur-unread .tr-line.unread .tr-line-text {
+  filter: blur(4px);
+  transition: filter var(--t-fast);
+  user-select: none;
+}
+.pf-transcript-scroll.blur-unread .tr-line.unread:hover .tr-line-text { filter: none; }
+
 .pf-transcript-scroll {
   flex: 1;
   overflow-y: auto;

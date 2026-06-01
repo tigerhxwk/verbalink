@@ -110,15 +110,6 @@ function b64Blob(b64, mime) {
   return new Blob([arr], { type: mime });
 }
 
-function playBlob(blob) {
-  return new Promise(res => {
-    const url = URL.createObjectURL(blob);
-    const a = new Audio(url);
-    a.onended = () => { URL.revokeObjectURL(url); res(); };
-    a.onerror = res;
-    a.play().catch(res);
-  });
-}
 
 function waitUntil(pred) {
   return new Promise(res => { const t = () => pred() ? res() : requestAnimationFrame(t); t(); });
@@ -597,15 +588,39 @@ function saveBookSettings(patch) {
 }
 
 // ── Open book / player ────────────────────────────────────────────────────────
-let _transcriptRefreshTimer = null;
+// Sliding transcript window — the browser only holds ~120 sentences around the
+// current position, refetched as you play or seek (keeps memory tiny on long books).
+let _winFetching = false;
+const WIN = { lo: Infinity, hi: -Infinity, hasPrev: false, hasNext: false, bookId: null };
 
-async function refreshPartialTranscript(bookId) {
-  if (!S.book || S.book.id !== bookId) { clearInterval(_transcriptRefreshTimer); return; }
+function _resetWindow() {
+  S.transcript = [];
+  S.activeIdx = -1;
+  WIN.lo = Infinity; WIN.hi = -Infinity; WIN.hasPrev = false; WIN.hasNext = false; WIN.bookId = null;
+}
+
+async function ensureWindow(t, force = false) {
+  if (!S.book || _winFetching) return;
+  const haveWindow = S.transcript.length > 0 && WIN.bookId === S.book.id;
+  // Refetch when we have nothing, jumped before the window, or are nearing its
+  // forward edge with more sentences available (also keeps up with live transcription).
+  const need = force || !haveWindow
+    || (t < WIN.lo + 5 && WIN.hasPrev)
+    || (t > WIN.hi - 15 && WIN.hasNext);
+  if (!need) return;
+  _winFetching = true;
   try {
-    const data = await api('GET', `/api/books/${bookId}/transcript`);
-    S.transcript = data.segments || S.transcript;
-    if (data.complete) clearInterval(_transcriptRefreshTimer);
-  } catch {}
+    const data = await api('GET', `/api/books/${S.book.id}/sentences?around=${Math.max(0, t)}`);
+    S.transcript = data.segments || [];
+    WIN.lo = data.window_start_sec; WIN.hi = data.window_end_sec;
+    WIN.hasPrev = data.has_prev; WIN.hasNext = data.has_next; WIN.bookId = S.book.id;
+    S.activeIdx = -1;
+    updateActive(audioEl.currentTime);
+  } catch {
+    // transcript not ready yet — leave window empty, will retry on next tick
+  } finally {
+    _winFetching = false;
+  }
 }
 
 function _startAudio(bookId, prog, autoplay) {
@@ -619,8 +634,7 @@ function _startAudio(bookId, prog, autoplay) {
 
 async function openBook(book, collId = null, autoplay = false) {
   S.book = book;
-  S.transcript = [];
-  S.activeIdx  = -1;
+  _resetWindow();
   S.playlistCollId = collId;
 
   // Close clarify, reset panel state
@@ -672,19 +686,8 @@ async function openBook(book, collId = null, autoplay = false) {
   _essayNotifShown = false;
   loadLastEssayPos(book.id).catch(() => {});
 
-  // Load transcript silently for updateActive (mini-player subtitle)
-  try {
-    const data = await api('GET', `/api/books/${book.id}/transcript`);
-    S.transcript = data.segments || [];
-    // If still transcribing, keep refreshing the partial transcript so the subtitle
-    // (and Clarify reach) extend as more sentences are produced.
-    clearInterval(_transcriptRefreshTimer);
-    if (!data.complete) {
-      _transcriptRefreshTimer = setInterval(() => refreshPartialTranscript(book.id), 20000);
-    }
-  } catch {
-    S.transcript = [];
-  }
+  // Load the initial transcript window around the saved position
+  ensureWindow(savedPos(book.id) || 0, true);
 
   // Load playlist when opened from a collection
   if (collId) {
@@ -753,15 +756,19 @@ audioEl.addEventListener('timeupdate', () => {
   $('time-cur').textContent     = fmt(t);
   $('mini-seek-fill').style.width = (t / dur * 100).toFixed(2) + '%';
   updateActive(t);
+  ensureWindow(t);  // slide the transcript window as playback advances
   if (S.book) { savePos(S.book.id, t); saveBookSettings({ progress_sec: t }); }
 });
+
+// Refetch the window after a seek (user may have jumped far from the loaded range)
+audioEl.addEventListener('seeked', () => { if (S.book) ensureWindow(audioEl.currentTime); });
 
 const PLAY_SVG  = `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
 const PAUSE_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
 const MINI_PLAY  = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
 const MINI_PAUSE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
 
-audioEl.addEventListener('play',  () => { $('play-btn').innerHTML = PAUSE_SVG; $('mini-play-btn').innerHTML = MINI_PAUSE; });
+audioEl.addEventListener('play',  () => { stopTts(); $('play-btn').innerHTML = PAUSE_SVG; $('mini-play-btn').innerHTML = MINI_PAUSE; });
 audioEl.addEventListener('pause', () => { $('play-btn').innerHTML = PLAY_SVG;  $('mini-play-btn').innerHTML = MINI_PLAY; });
 
 // ── Playback controls ─────────────────────────────────────────────────────────
@@ -875,6 +882,7 @@ function hideRightPanel() {
 function openClPanel() { showRightPanel('clarify'); }
 
 function closeClPanel() {
+  stopTts();
   if (S.playlistBooks.length > 1) {
     showRightPanel('playlist');
   } else {
@@ -915,14 +923,35 @@ document.querySelectorAll('.cl-mode-btn').forEach(b =>
 let _audioOrigB64 = null;
 let _audioTrlB64  = null;
 
-function playB64Audio(b64) {
-  if (!b64) return;
-  const blob = b64Blob(b64, 'audio/wav');
-  playBlob(blob);
+// Single shared TTS player — starting one clip stops any other (original vs translation
+// are mutually exclusive). Re-clicking the playing source toggles it off.
+let _ttsAudio = null;
+let _ttsSource = null;  // 'orig' | 'trl'
+
+function stopTts() {
+  if (_ttsAudio) {
+    _ttsAudio.pause();
+    if (_ttsAudio.src) URL.revokeObjectURL(_ttsAudio.src);
+    _ttsAudio = null;
+  }
+  _ttsSource = null;
 }
 
-$('cl-tts-orig').addEventListener('click', () => playB64Audio(_audioOrigB64));
-$('cl-tts-trl').addEventListener('click',  () => playB64Audio(_audioTrlB64));
+function playB64Audio(b64, source) {
+  // Toggle off if the same source is already playing
+  if (_ttsSource === source && _ttsAudio && !_ttsAudio.paused) { stopTts(); return; }
+  stopTts();
+  if (!b64) return;
+  const url = URL.createObjectURL(b64Blob(b64, 'audio/wav'));
+  _ttsAudio = new Audio(url);
+  _ttsSource = source;
+  _ttsAudio.onended = () => stopTts();
+  _ttsAudio.onerror = () => stopTts();
+  _ttsAudio.play().catch(() => stopTts());
+}
+
+$('cl-tts-orig').addEventListener('click', () => playB64Audio(_audioOrigB64, 'orig'));
+$('cl-tts-trl').addEventListener('click',  () => playB64Audio(_audioTrlB64, 'trl'));
 
 // ── Auto-resume countdown ──────────────────────────────────────────────────────
 let _autoResumeTimer = null;
@@ -982,8 +1011,68 @@ async function streamPost(path, body, onEvent) {
   }
 }
 
-async function runClarify() {
-  if (S.clarifying || !S.book) return;
+// Recent sentences up to the current playback position (current + a few previous).
+function recentSentences(maxCount = 5) {
+  const t = audioEl.currentTime;
+  const segs = S.transcript || [];
+  if (!segs.length) return { list: [], currentIdx: -1 };
+  let idx = segs.findIndex(s => s.start <= t && t <= s.end);
+  if (idx === -1) {
+    for (let i = segs.length - 1; i >= 0; i--) { if (segs[i].end <= t) { idx = i; break; } }
+  }
+  if (idx === -1) idx = 0;
+  const start = Math.max(0, idx - (maxCount - 1));
+  return { list: segs.slice(start, idx + 1), currentIdx: idx };
+}
+
+function buildSentencePicker() {
+  const picker = $('cl-picker');
+  const wrap = $('cl-picker-wrap');
+  const { list } = recentSentences(5);
+  if (list.length <= 1) { wrap.classList.add('hidden'); picker.innerHTML = ''; return list; }
+  wrap.classList.remove('hidden');
+  picker.innerHTML = '';
+  list.forEach((seg, i) => {
+    const row = document.createElement('button');
+    row.className = 'cl-picker-item' + (i === list.length - 1 ? ' current' : '');
+    row.textContent = seg.text.trim();
+    row.addEventListener('click', () => {
+      if (S.clarifying) return;
+      picker.querySelectorAll('.cl-picker-item').forEach(el => el.classList.remove('selected'));
+      row.classList.add('selected');
+      analyzeSentence((seg.start + seg.end) / 2);
+    });
+    picker.appendChild(row);
+  });
+  return list;
+}
+
+function runClarify() {
+  if (!S.book) return;
+  audioEl.pause();
+  clearAutoResume();
+  openClPanel();
+  // Reset display
+  $('cl-original').textContent   = '';
+  $('cl-translated').textContent = '';
+  $('cl-explanation').textContent = '';
+  $('cl-explanation').classList.add('hidden');
+  $('cl-terms').classList.add('hidden');
+  // Build the picker and analyze the current sentence by default (instant + switchable)
+  const list = buildSentencePicker();
+  if (list.length) {
+    const cur = list[list.length - 1];
+    const items = $('cl-picker').querySelectorAll('.cl-picker-item');
+    if (items.length) items[items.length - 1].classList.add('selected');
+    analyzeSentence((cur.start + cur.end) / 2);
+  } else {
+    analyzeSentence(audioEl.currentTime);  // transcript not loaded — fall back to position
+  }
+}
+
+async function analyzeSentence(positionSec) {
+  if (S.clarifying) return;
+  stopTts();  // stop any TTS from a previously-clarified sentence
   S.clarifying = true;
   $('clarify-btn').disabled      = true;
   $('mini-clarify-btn').disabled = true;
@@ -991,24 +1080,22 @@ async function runClarify() {
   _audioTrlB64  = null;
   $('cl-tts-orig').disabled = true;
   $('cl-tts-trl').disabled  = true;
-
-  audioEl.pause();
   clearAutoResume();
-  openClPanel();
-  $('cl-original').textContent   = '…';
+
   $('cl-translated').textContent = '';
   $('cl-explanation').textContent = '';
   $('cl-explanation').classList.add('hidden');
   $('cl-terms').classList.add('hidden');
+  $('cl-original').textContent = '…';
   setClStatus('Analyzing…', true);
 
   try {
     const expl = $('cl-explanation');
     const panel = $('pf-clarify-panel');
-    let sentenceStart = audioEl.currentTime;
+    let sentenceStart = positionSec;
 
     await streamPost('/api/clarify/stream',
-      { book_id: S.book.id, position_sec: audioEl.currentTime, mode: _clarifyMode },
+      { book_id: S.book.id, position_sec: positionSec, mode: _clarifyMode },
       (ev) => {
         if (ev.type === 'meta') {
           $('cl-src-pill').textContent   = LANG[ev.source_lang] || ev.source_lang;
@@ -1023,14 +1110,12 @@ async function runClarify() {
           $('cl-tts-orig').disabled = !_audioOrigB64;
           $('cl-tts-trl').disabled  = !_audioTrlB64;
           sentenceStart = ev.sentence_start;
-          panel.scrollTop = panel.scrollHeight;
         } else if (ev.type === 'token') {
           expl.textContent += ev.text;
           panel.scrollTop = panel.scrollHeight;  // follow streaming text
         } else if (ev.type === 'done') {
-          // Only start the auto-continue countdown after the explanation is fully streamed
           setClStatus('');
-          startAutoResume(sentenceStart);
+          startAutoResume(sentenceStart);  // countdown only after explanation finishes
         }
       }
     );

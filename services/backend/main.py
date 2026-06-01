@@ -954,6 +954,41 @@ async def get_transcript(book_id: str, user: dict = Depends(current_user)):
     return {"segments": segments, "complete": complete}
 
 
+@app.get("/api/books/{book_id}/sentences")
+async def get_sentences(book_id: str, around: float = 0.0, before: int = 60, after: int = 60,
+                        user: dict = Depends(current_user)):
+    """Return a window of sentences around `around` seconds — keeps the browser from
+    holding the whole transcript. before/after are sentence counts on each side."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM books WHERE id=? AND user_id=?", (book_id, user["id"])).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404)
+    segments, complete = _read_transcript(book_id)
+    if not segments:
+        raise HTTPException(404, "Transcript not ready")
+
+    # Index of the sentence containing `around`, else the last one ending before it
+    idx = next((i for i, s in enumerate(segments) if s["start"] <= around <= s["end"]), None)
+    if idx is None:
+        idx = 0
+        for i in range(len(segments) - 1, -1, -1):
+            if segments[i]["end"] <= around:
+                idx = i
+                break
+    lo = max(0, idx - max(0, before))
+    hi = min(len(segments), idx + max(0, after) + 1)
+    window = segments[lo:hi]
+    return {
+        "segments": window,
+        "complete": complete,
+        "has_prev": lo > 0,
+        "has_next": hi < len(segments),
+        "window_start_sec": window[0]["start"] if window else 0,
+        "window_end_sec": window[-1]["end"] if window else 0,
+    }
+
+
 # ── Collections ────────────────────────────────────────────────────────────────
 
 @app.get("/api/collections")

@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+httpx
+aiofiles
+tinytag
+ldap3
+PyJWT
+passlib[bcrypt]
+bcrypt<4.0
+python-multipart

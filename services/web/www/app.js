@@ -1,0 +1,990 @@
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+const S = {
+  page: 'dashboard',
+  books: [],
+  collections: [],
+  openCollId: null,      // collection detail currently shown
+  book: null,
+  transcript: [],
+  activeIdx: -1,
+  seeking: false,
+  playerOpen: false,
+  clarifying: false,
+  pollTimer: null,
+  pendingFile: null,     // waiting for lang modal
+  pendingCollId: null,   // collection context for the pending upload
+  searchQuery: '',
+  libFilter: 'all',
+  currentUser: null,
+  playlistCollId: null,
+  playlistBooks: [],
+  shuffle: false,
+};
+
+// ── DOM ───────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const audioEl     = $('audio-el');
+const miniPlayer  = $('mini-player');
+const playerFull  = $('player-full');
+const pfFull = $('player-full');
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const LANG = {
+  en: 'English', ru: 'Russian', de: 'German',   fr: 'French',
+  es: 'Spanish', it: 'Italian', pt: 'Portuguese', nl: 'Dutch',
+  pl: 'Polish',  uk: 'Ukrainian', sv: 'Swedish', tr: 'Turkish',
+  ar: 'Arabic',  zh: 'Chinese',  ja: 'Japanese', ko: 'Korean',
+};
+const LANG_ALL = Object.entries(LANG);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmt(sec) {
+  if (!isFinite(sec) || sec < 0) return '0:00';
+  return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+}
+
+function bookGradient(title) {
+  let h = 5381;
+  for (let i = 0; i < title.length; i++) h = ((h << 5) + h) ^ title.charCodeAt(i);
+  const hue = Math.abs(h) % 360;
+  return `linear-gradient(145deg,hsl(${hue},50%,22%) 0%,hsl(${(hue+38)%360},40%,13%) 55%,hsl(${(hue+190)%360},28%,8%) 100%)`;
+}
+
+function parseBookMeta(title) {
+  const m = (title || '').match(/^(.+?)\s+-\s+(.+)$/);
+  return m ? { author: m[1].trim(), name: m[2].trim() } : { author: '', name: title || '' };
+}
+
+function bookCoverInner(title) {
+  const { author, name } = parseBookMeta(title);
+  const initial = ((name || title || '?')[0] || '?').toUpperCase();
+  return `<span class="book-initial">${initial}</span>` +
+    `<div class="book-cover-meta">` +
+    `<span class="book-cover-title">${esc(name || title)}</span>` +
+    (author ? `<span class="book-cover-author">${esc(author)}</span>` : '') +
+    `</div>`;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function b64Blob(b64, mime) {
+  const bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+function playBlob(blob) {
+  return new Promise(res => {
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(url);
+    a.onended = () => { URL.revokeObjectURL(url); res(); };
+    a.onerror = res;
+    a.play().catch(res);
+  });
+}
+
+function waitUntil(pred) {
+  return new Promise(res => { const t = () => pred() ? res() : requestAnimationFrame(t); t(); });
+}
+
+function savedPos(id)   { return parseFloat(localStorage.getItem('pos:' + id) || '0') || 0; }
+function savePos(id, t) { localStorage.setItem('pos:' + id, t); }
+
+function recentIds() { return JSON.parse(localStorage.getItem('recent') || '[]'); }
+function pushRecent(id) {
+  localStorage.setItem('recent', JSON.stringify([id, ...recentIds().filter(x => x !== id)].slice(0, 12)));
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function api(method, path, body, onProgress) {
+  if (body instanceof FormData) {
+    return new Promise((res, rej) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', path);
+      if (onProgress) xhr.upload.onprogress = onProgress;
+      xhr.onload = () => {
+        if (xhr.status === 401) { onUnauthorized(); rej(new Error('Unauthorized')); return; }
+        try { res(JSON.parse(xhr.responseText)); } catch { rej(new Error(xhr.responseText)); }
+      };
+      xhr.onerror = () => rej(new Error('Upload failed'));
+      xhr.send(body);
+    });
+  }
+  const opts = { method };
+  if (body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  if (r.status === 401) { onUnauthorized(); throw new Error('Unauthorized'); }
+  if (!r.ok) throw new Error(await r.text());
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function setPage(page, extra) {
+  S.page = page;
+  document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.nav-item').forEach(n =>
+    n.classList.toggle('active', n.dataset.page === page || (page === 'collection' && n.dataset.page === 'collections'))
+  );
+  const el = $('page-' + page);
+  if (!el) return;
+  el.classList.remove('hidden');
+  if (page === 'dashboard')   renderDashboard();
+  if (page === 'library')     renderLibrary();
+  if (page === 'collections') renderCollectionsList();
+  if (page === 'collection')  renderCollectionDetail(extra);
+}
+
+document.querySelectorAll('.nav-item').forEach(btn =>
+  btn.addEventListener('click', () => setPage(btn.dataset.page))
+);
+
+// ── Greeting ──────────────────────────────────────────────────────────────────
+function setGreeting() {
+  const h = new Date().getHours();
+  $('greeting').textContent = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
+
+// ── Load everything ───────────────────────────────────────────────────────────
+async function loadAll() {
+  [S.books, S.collections] = await Promise.all([
+    api('GET', '/api/books'),
+    api('GET', '/api/collections'),
+  ]);
+  render();
+  schedulePoll();
+}
+
+function render() {
+  if (S.page === 'dashboard')        renderDashboard();
+  else if (S.page === 'library')     renderLibrary();
+  else if (S.page === 'collections') renderCollectionsList();
+  else if (S.page === 'collection')  renderCollectionDetail(S.openCollId);
+}
+
+function schedulePoll() {
+  clearTimeout(S.pollTimer);
+  const needsPoll = S.books.some(b =>
+    b.transcription_status === 'pending' || b.transcription_status === 'processing' ||
+    b.translation_status === 'processing'
+  );
+  if (needsPoll) S.pollTimer = setTimeout(loadAll, 4000);
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+function renderDashboard() {
+  const recent  = recentIds();
+  const heroBook = recent.map(id => S.books.find(b => b.id === id)).find(b => b && savedPos(b.id) > 30);
+
+  // Hero
+  const heroSec = $('hero-section');
+  if (heroBook) {
+    heroSec.classList.remove('hidden');
+    const pos = savedPos(heroBook.id);
+    const pct = heroBook.duration_sec ? Math.round(pos / heroBook.duration_sec * 100) : 0;
+    $('continue-hero').innerHTML = `
+      <div class="continue-hero-bg" style="background:${bookGradient(heroBook.title)}"></div>
+      <div class="continue-hero-scrim"></div>
+      <div class="continue-hero-content">
+        <div class="continue-hero-eyebrow">Continue Reading</div>
+        <div class="continue-hero-title">${esc(heroBook.title)}</div>
+        <div class="continue-hero-bar">
+          <div class="continue-hero-progress"><div style="width:${pct}%"></div></div>
+          <span class="continue-hero-pct">${pct}%</span>
+          <div class="continue-hero-play">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+          </div>
+        </div>
+      </div>`;
+    $('continue-hero').onclick = () => openBook(heroBook);
+  } else {
+    heroSec.classList.add('hidden');
+  }
+
+  // Recently played row
+  const recentSec = $('recent-section');
+  const recentBooks = recent.map(id => S.books.find(b => b.id === id)).filter(Boolean);
+  if (recentBooks.length > 1) {
+    recentSec.classList.remove('hidden');
+    const row = $('recent-row');
+    row.innerHTML = '';
+    recentBooks.slice(0, 10).forEach(b => row.appendChild(makeBookMini(b)));
+  } else {
+    recentSec.classList.add('hidden');
+  }
+
+  // Collections (compact)
+  renderCollectionsDash();
+
+  // All books
+  const grid  = $('dash-books');
+  const empty = $('dash-empty');
+  grid.innerHTML = '';
+  if (!S.books.length) {
+    grid.classList.add('hidden'); empty.classList.remove('hidden');
+  } else {
+    grid.classList.remove('hidden'); empty.classList.add('hidden');
+    S.books.forEach(b => grid.appendChild(makeBookCard(b)));
+  }
+}
+
+function renderCollectionsDash() {
+  const grid  = $('collections-grid');
+  const empty = $('coll-empty');
+  grid.innerHTML = '';
+  if (!S.collections.length) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  S.collections.forEach(c => grid.appendChild(makeCollCard(c)));
+}
+
+// ── Library ───────────────────────────────────────────────────────────────────
+function renderLibrary() {
+  let books = S.books;
+  if (S.libFilter !== 'all') books = books.filter(b => b.transcription_status === S.libFilter);
+  if (S.searchQuery) {
+    const q = S.searchQuery.toLowerCase();
+    books = books.filter(b => b.title.toLowerCase().includes(q));
+  }
+  const grid  = $('lib-books');
+  const empty = $('lib-empty');
+  grid.innerHTML = '';
+  if (!books.length) {
+    empty.classList.remove('hidden');
+  } else {
+    empty.classList.add('hidden');
+    books.forEach(b => grid.appendChild(makeBookCard(b)));
+  }
+}
+
+$('search-input').addEventListener('input', e => { S.searchQuery = e.target.value.trim(); renderLibrary(); });
+$('filter-chips').addEventListener('click', e => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+  chip.classList.add('active');
+  S.libFilter = chip.dataset.filter;
+  renderLibrary();
+});
+
+// ── Collections ───────────────────────────────────────────────────────────────
+function renderCollectionsList() {
+  const grid  = $('coll-full-grid');
+  const empty = $('coll-full-empty');
+  grid.innerHTML = '';
+  if (!S.collections.length) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  S.collections.forEach(c => grid.appendChild(makeCollCard(c, true)));
+}
+
+function makeCollCard(coll, large = false) {
+  const card = document.createElement('div');
+  card.className = 'coll-card';
+  if (large) card.style.minHeight = '80px';
+  card.innerHTML = `
+    <div class="coll-card-name">${esc(coll.name)}</div>
+    <div class="coll-card-count">${coll.book_count} book${coll.book_count !== 1 ? 's' : ''}</div>
+    <button class="coll-delete" data-id="${coll.id}" title="Delete">✕</button>`;
+  card.addEventListener('click', e => {
+    if (e.target.closest('.coll-delete')) return;
+    openCollection(coll.id);
+  });
+  card.querySelector('.coll-delete').addEventListener('click', e => {
+    e.stopPropagation();
+    deleteCollection(coll.id);
+  });
+  return card;
+}
+
+function openCollection(collId) {
+  S.openCollId = collId;
+  setPage('collection', collId);
+}
+
+async function renderCollectionDetail(collId) {
+  if (!collId) return;
+  const coll = S.collections.find(c => c.id === collId);
+  if (!coll) { setPage('collections'); return; }
+
+  $('coll-detail-title').textContent = coll.name;
+
+  const list  = $('coll-detail-list');
+  const empty = $('coll-detail-empty');
+  list.innerHTML = '<div class="t-loading">Loading…</div>';
+  empty.classList.add('hidden');
+
+  const books = await api('GET', `/api/collections/${collId}/books`);
+  list.innerHTML = '';
+
+  if (!books.length) {
+    empty.classList.remove('hidden');
+    return;
+  }
+
+  books.forEach(b => {
+    const row = document.createElement('div');
+    row.className = 'coll-book-row ready';
+
+    const dotCls = { done:'dot-done', pending:'dot-pending', processing:'dot-processing', error:'dot-error' }[b.transcription_status] || 'dot-pending';
+    const statusTxt = b.transcription_status === 'processing' ? 'transcribing…' : b.transcription_status;
+
+    row.innerHTML = `
+      <div class="coll-book-cover" style="background:${bookGradient(b.title)}">${bookCoverInner(b.title)}</div>
+      <div class="coll-book-info">
+        <div class="coll-book-title">${esc(b.title)}</div>
+        <div class="coll-book-meta">
+          <span class="status-dot ${dotCls}"></span>${statusTxt}
+          &nbsp;·&nbsp;${LANG[b.source_lang] || b.source_lang}
+          → ${LANG[b.target_lang] || b.target_lang}
+          ${b.duration_sec ? `&nbsp;·&nbsp;${fmt(b.duration_sec)}` : ''}
+        </div>
+        ${b.transcription_status === 'error' && b.error ? `<div style="font-size:10px;color:var(--danger);margin-top:3px">${esc(b.error.slice(0,120))}</div>` : ''}
+      </div>
+      <div class="coll-book-actions">
+        ${b.transcription_status === 'error' ? `<button class="coll-retranscribe" data-id="${b.id}">retry</button>` : ''}
+        <button class="coll-remove" data-id="${b.id}" title="Remove from collection">✕</button>
+      </div>`;
+
+    row.addEventListener('click', e => {
+      if (e.target.closest('.coll-book-actions')) return;
+      const full = S.books.find(bk => bk.id === b.id) || b;
+      openBook(full, collId);
+    });
+
+    row.querySelector('.coll-remove')?.addEventListener('click', async e => {
+      e.stopPropagation();
+      await api('DELETE', `/api/collections/${collId}/books/${b.id}`);
+      renderCollectionDetail(collId);
+      await loadAll();
+    });
+
+    row.querySelector('.coll-retranscribe')?.addEventListener('click', async e => {
+      e.stopPropagation();
+      await api('POST', `/api/books/${b.id}/retranscribe`);
+      await loadAll();
+      renderCollectionDetail(collId);
+    });
+
+    list.appendChild(row);
+  });
+}
+
+$('coll-back-btn').addEventListener('click', () => setPage('collections'));
+
+async function deleteCollection(id) {
+  if (!confirm('Delete this collection? Books will not be deleted.')) return;
+  await api('DELETE', `/api/collections/${id}`);
+  await loadAll();
+  if (S.page === 'collection' && S.openCollId === id) setPage('collections');
+}
+
+// Collection create modal
+function openCollModal() {
+  $('coll-name-input').value = '';
+  $('coll-modal').classList.remove('hidden');
+  setTimeout(() => $('coll-name-input').focus(), 50);
+}
+$('new-coll-btn').addEventListener('click', openCollModal);
+$('new-coll-btn-2').addEventListener('click', openCollModal);
+$('coll-cancel-btn').addEventListener('click', () => $('coll-modal').classList.add('hidden'));
+$('coll-create-btn').addEventListener('click', async () => {
+  const name = $('coll-name-input').value.trim();
+  if (!name) return;
+  await api('POST', '/api/collections', { name });
+  $('coll-modal').classList.add('hidden');
+  await loadAll();
+});
+$('coll-name-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('coll-create-btn').click(); });
+
+// ── Upload ────────────────────────────────────────────────────────────────────
+function triggerUpload(file, collId = null) {
+  if (!file) return;
+  S.pendingFile = file;
+  S.pendingCollId = collId;
+  $('modal-filename').textContent = file.name;
+
+  // Populate collection dropdown
+  const collSel = $('upload-coll-sel');
+  collSel.innerHTML = '<option value="">— none —</option>';
+  S.collections.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    if (c.id === collId) opt.selected = true;
+    collSel.appendChild(opt);
+  });
+
+  $('lang-modal').classList.remove('hidden');
+
+  // Detect source language from filename in the background
+  const srcSel = $('src-lang-sel');
+  srcSel.disabled = true;
+  api('POST', '/api/detect_language', { filename: file.name })
+    .then(d => { if (d.lang) srcSel.value = d.lang; })
+    .catch(() => {})
+    .finally(() => { srcSel.disabled = false; });
+}
+
+['file-input-main', 'file-input-lib', 'file-input-empty'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('change', () => { triggerUpload(el.files[0]); el.value = ''; });
+});
+
+// Collection-context upload inputs
+document.addEventListener('change', e => {
+  if (e.target.id === 'file-input-coll' || e.target.id === 'file-input-coll2') {
+    triggerUpload(e.target.files[0], S.openCollId);
+    e.target.value = '';
+  }
+});
+
+$('lang-cancel-btn').addEventListener('click', () => {
+  $('lang-modal').classList.add('hidden');
+  S.pendingFile = null;
+  S.pendingCollId = null;
+});
+
+$('lang-confirm-btn').addEventListener('click', async () => {
+  $('lang-modal').classList.add('hidden');
+  const file    = S.pendingFile;
+  const collId  = $('upload-coll-sel').value || S.pendingCollId || null;
+  S.pendingFile = null;
+  S.pendingCollId = null;
+  if (!file) return;
+
+  const src = $('src-lang-sel').value;
+  const tgt = $('tgt-lang-sel').value;
+  const fd  = new FormData();
+  fd.append('file', file);
+
+  let url = `/api/books?source_lang=${src}&target_lang=${tgt}`;
+  if (collId) url += `&collection_id=${collId}`;
+
+  const toast = $('upload-toast'), fill = $('toast-fill'), label = $('toast-label');
+  toast.classList.remove('hidden');
+  fill.style.width = '0%';
+  label.textContent = `Uploading ${file.name}…`;
+
+  try {
+    await api('POST', url, fd, e => {
+      if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100).toFixed(0) + '%';
+    });
+    fill.style.width = '100%';
+    label.textContent = collId ? 'Added to collection, transcribing…' : 'Queued for transcription';
+    await loadAll();
+    if (S.page === 'collection') renderCollectionDetail(S.openCollId);
+  } catch (err) {
+    label.textContent = 'Upload failed: ' + err.message;
+  } finally {
+    setTimeout(() => toast.classList.add('hidden'), 3500);
+  }
+});
+
+// ── Book card builders ────────────────────────────────────────────────────────
+function makeBookCard(book) {
+  const card = document.createElement('div');
+  card.className = 'book-card';
+  const pos = savedPos(book.id);
+  const pct = book.duration_sec && pos ? Math.round(pos / book.duration_sec * 100) : 0;
+  const dotCls = { done:'dot-done', pending:'dot-pending', processing:'dot-processing', error:'dot-error' }[book.transcription_status] || 'dot-pending';
+  const statusTxt = book.transcription_status === 'processing' ? 'transcribing' : book.transcription_status;
+  card.innerHTML = `
+    <button class="book-delete" data-id="${book.id}" title="Delete">✕</button>
+    <div class="book-card-cover"><div class="book-card-cover-inner" style="background:${bookGradient(book.title)}">${bookCoverInner(book.title)}</div></div>
+    <div class="book-card-body">
+      <div class="book-card-title">${esc(book.title)}</div>
+      <div class="book-card-meta">
+        <span class="book-card-lang">${LANG[book.source_lang] || book.source_lang}</span>
+        <span class="book-card-status"><span class="status-dot ${dotCls}"></span>${statusTxt}</span>
+      </div>
+      ${pct > 0 ? `<div class="book-card-progress"><div style="width:${pct}%"></div></div>` : ''}
+    </div>`;
+  card.querySelector('.book-delete').addEventListener('click', e => { e.stopPropagation(); deleteBook(book.id); });
+  card.addEventListener('click', e => { if (!e.target.closest('.book-delete')) openBook(book); });
+  return card;
+}
+
+function makeBookMini(book) {
+  const wrap = document.createElement('div');
+  wrap.className = 'book-mini';
+  wrap.innerHTML = `
+    <div class="book-mini-cover" style="background:${bookGradient(book.title)}">${bookCoverInner(book.title)}</div>
+    <div class="book-mini-title">${esc(book.title)}</div>
+    <div class="book-mini-lang">${LANG[book.source_lang] || book.source_lang}</div>`;
+  wrap.addEventListener('click', () => openBook(book));
+  return wrap;
+}
+
+async function deleteBook(id) {
+  if (!confirm('Delete this book and its transcript?')) return;
+  await api('DELETE', `/api/books/${id}`);
+  await loadAll();
+}
+
+// ── Open book / player ────────────────────────────────────────────────────────
+async function openBook(book, collId = null) {
+  S.book = book;
+  S.transcript = [];
+  S.activeIdx  = -1;
+  S.playlistCollId = collId;
+
+  // Close clarify, reset panel state
+  clearAutoResume();
+  $('pf-clarify-panel').classList.add('hidden');
+  pfFull.classList.remove('pf-panel-open');
+  $('pf-right-panel').classList.add('hidden');
+
+  pushRecent(book.id);
+
+  const bg = bookGradient(book.title);
+  [$('pf-cover'), $('mini-cover')].forEach(d => {
+    if (d) { d.style.background = bg; d.innerHTML = bookCoverInner(book.title); }
+  });
+  $('pf-title').textContent      = book.title;
+  $('pf-src-lang').textContent   = LANG[book.source_lang] || book.source_lang;
+  $('pf-book-label').textContent = book.title;
+  $('mini-title').textContent    = book.title;
+  $('mini-sub').textContent      = LANG[book.source_lang] || book.source_lang;
+
+  // Sync target lang selector
+  $('pf-tgt-sel').value = book.target_lang || 'en';
+
+  audioEl.src = `/api/books/${book.id}/audio`;
+  audioEl.load();
+  const saved = savedPos(book.id);
+  if (saved > 0) audioEl.addEventListener('loadedmetadata', () => { audioEl.currentTime = saved; }, { once: true });
+
+  miniPlayer.classList.remove('hidden');
+  openFullPlayer();
+
+  // Load transcript silently for updateActive (mini-player subtitle)
+  try {
+    const data = await api('GET', `/api/books/${book.id}/transcript`);
+    S.transcript = data.segments || [];
+  } catch {
+    S.transcript = [];
+  }
+
+  // Load playlist when opened from a collection
+  if (collId) {
+    try {
+      const books = await api('GET', `/api/collections/${collId}/books`);
+      S.playlistBooks = books;
+    } catch {
+      S.playlistBooks = [];
+    }
+    if (S.playlistBooks.length > 1) {
+      renderPlaylist();
+      showRightPanel('playlist');
+    }
+  } else {
+    S.playlistBooks = [];
+  }
+}
+
+// ── Language selector in player ───────────────────────────────────────────────
+$('pf-tgt-sel').addEventListener('change', async () => {
+  if (!S.book) return;
+  const newLang = $('pf-tgt-sel').value;
+  try {
+    const updated = await api('PATCH', `/api/books/${S.book.id}`, { target_lang: newLang });
+    S.book = updated;
+    // Sync in books list
+    const idx = S.books.findIndex(b => b.id === updated.id);
+    if (idx !== -1) S.books[idx] = updated;
+  } catch (err) {
+    console.error('Failed to update language:', err);
+    $('pf-tgt-sel').value = S.book.target_lang; // revert
+  }
+});
+
+// ── Full player show/hide ─────────────────────────────────────────────────────
+function openFullPlayer() {
+  playerFull.classList.remove('hidden');
+  requestAnimationFrame(() => playerFull.classList.add('visible'));
+  S.playerOpen = true;
+}
+
+function closeFullPlayer() {
+  playerFull.classList.remove('visible');
+  S.playerOpen = false;
+  playerFull.addEventListener('transitionend', () => {
+    if (!S.playerOpen) playerFull.classList.add('hidden');
+  }, { once: true });
+}
+
+$('pf-collapse-btn').addEventListener('click', closeFullPlayer);
+$('mini-expand-btn').addEventListener('click', () => S.playerOpen ? closeFullPlayer() : openFullPlayer());
+$('mini-expand').addEventListener('click',     () => { if (!S.playerOpen) openFullPlayer(); });
+
+// ── Audio events ──────────────────────────────────────────────────────────────
+audioEl.addEventListener('loadedmetadata', () => {
+  $('seek-bar').max = audioEl.duration;
+  $('time-total').textContent = fmt(audioEl.duration);
+});
+
+audioEl.addEventListener('timeupdate', () => {
+  if (S.seeking) return;
+  const t   = audioEl.currentTime;
+  const dur = audioEl.duration || 1;
+  $('seek-bar').value           = t;
+  $('time-cur').textContent     = fmt(t);
+  $('mini-seek-fill').style.width = (t / dur * 100).toFixed(2) + '%';
+  updateActive(t);
+  if (S.book) savePos(S.book.id, t);
+});
+
+const PLAY_SVG  = `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
+const PAUSE_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+const MINI_PLAY  = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
+const MINI_PAUSE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+
+audioEl.addEventListener('play',  () => { $('play-btn').innerHTML = PAUSE_SVG; $('mini-play-btn').innerHTML = MINI_PAUSE; });
+audioEl.addEventListener('pause', () => { $('play-btn').innerHTML = PLAY_SVG;  $('mini-play-btn').innerHTML = MINI_PLAY; });
+
+// ── Playback controls ─────────────────────────────────────────────────────────
+$('play-btn').addEventListener('click',    () => { clearAutoResume(); audioEl.paused ? audioEl.play() : audioEl.pause(); });
+$('mini-play-btn').addEventListener('click', () => { clearAutoResume(); audioEl.paused ? audioEl.play() : audioEl.pause(); });
+$('rewind-btn').addEventListener('click',  () => { audioEl.currentTime = Math.max(0, audioEl.currentTime - 15); });
+$('forward-btn').addEventListener('click', () => { audioEl.currentTime = Math.min(audioEl.duration || 0, audioEl.currentTime + 15); });
+
+$('seek-bar').addEventListener('mousedown', () => { S.seeking = true; });
+$('seek-bar').addEventListener('input',     () => { $('time-cur').textContent = fmt(+$('seek-bar').value); });
+$('seek-bar').addEventListener('change',    () => { audioEl.currentTime = +$('seek-bar').value; S.seeking = false; });
+
+$('speed-bar').addEventListener('input', () => {
+  const v = parseFloat($('speed-bar').value);
+  audioEl.playbackRate = v;
+  $('speed-val').textContent = v.toFixed(2).replace(/\.?0+$/, '') + '×';
+});
+
+const VOL_SVG_ON  = `<svg id="vol-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+const VOL_SVG_LOW = `<svg id="vol-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+const VOL_SVG_OFF = `<svg id="vol-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`;
+
+function updateVolUI(v) {
+  $('volume-val').textContent = Math.round(v * 100) + '%';
+  $('vol-mute-btn').innerHTML = v === 0 ? VOL_SVG_OFF : v < 0.4 ? VOL_SVG_LOW : VOL_SVG_ON;
+}
+
+$('volume-bar').addEventListener('input', () => {
+  const v = parseFloat($('volume-bar').value);
+  audioEl.volume = v;
+  updateVolUI(v);
+});
+
+let _prevVol = 1;
+$('vol-mute-btn').addEventListener('click', () => {
+  if (audioEl.volume > 0) {
+    _prevVol = audioEl.volume;
+    audioEl.volume = 0;
+    $('volume-bar').value = 0;
+  } else {
+    audioEl.volume = _prevVol;
+    $('volume-bar').value = _prevVol;
+  }
+  updateVolUI(audioEl.volume);
+});
+
+// ── Transcript / sentence navigation ─────────────────────────────────────────
+function jumpSentence(dir) {
+  const segs = S.transcript;
+  if (!segs.length) return;
+  const t = audioEl.currentTime;
+  if (dir < 0) {
+    const idx = S.activeIdx < 0 ? 0 : S.activeIdx;
+    const cur = segs[idx];
+    // If we're more than 2s into the current sentence, replay from its start
+    if (cur && t - cur.start > 2) {
+      audioEl.currentTime = cur.start;
+    } else if (idx > 0) {
+      audioEl.currentTime = segs[idx - 1].start;
+    } else {
+      audioEl.currentTime = segs[0].start;
+    }
+  } else {
+    const idx = S.activeIdx;
+    if (idx >= 0 && idx < segs.length - 1) {
+      audioEl.currentTime = segs[idx + 1].start;
+    }
+  }
+}
+
+$('prev-sent-btn').addEventListener('click', () => jumpSentence(-1));
+$('next-sent-btn').addEventListener('click', () => jumpSentence(1));
+
+function updateActive(t) {
+  const segs = S.transcript;
+  if (!segs.length) return;
+  let lo = 0, hi = segs.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (segs[mid].start <= t) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (idx === S.activeIdx) return;
+  S.activeIdx = idx;
+  // Update mini player subtitle with current segment text
+  if (idx >= 0 && segs[idx]) {
+    $('mini-sub').textContent = segs[idx].text;
+  }
+}
+
+// ── Right panel helpers ───────────────────────────────────────────────────────
+function showRightPanel(view) {
+  $('pf-right-panel').classList.remove('hidden');
+  pfFull.classList.add('pf-panel-open');
+  if (view === 'clarify') {
+    $('pf-playlist-view').classList.add('hidden');
+    $('pf-clarify-panel').classList.remove('hidden');
+  } else {
+    $('pf-clarify-panel').classList.add('hidden');
+    $('pf-playlist-view').classList.remove('hidden');
+  }
+}
+
+function hideRightPanel() {
+  $('pf-right-panel').classList.add('hidden');
+  pfFull.classList.remove('pf-panel-open');
+}
+
+// ── Clarify ───────────────────────────────────────────────────────────────────
+function openClPanel() { showRightPanel('clarify'); }
+
+function closeClPanel() {
+  if (S.playlistBooks.length > 1) {
+    showRightPanel('playlist');
+  } else {
+    hideRightPanel();
+  }
+}
+
+function renderClTerms(terms) {
+  const el = $('cl-terms');
+  if (!terms || !terms.length) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.innerHTML = terms.map(t => `
+    <div class="cl-term-item">
+      <div class="cl-term-name">${esc(t.term)}</div>
+      <div class="cl-term-meaning">${esc(t.meaning || '')}</div>
+      ${t.urban ? `<div class="cl-term-urban"><span class="cl-urban-label">Urban Dictionary</span>${esc(t.urban)}</div>` : ''}
+    </div>`).join('');
+}
+
+// ── Auto-resume countdown ──────────────────────────────────────────────────────
+let _autoResumeTimer = null;
+let _autoResumePos   = 0;
+
+function startAutoResume(position, secs = 10) {
+  clearAutoResume();
+  _autoResumePos = position;
+  let remaining = secs;
+  const tick = () => {
+    if (remaining <= 0) {
+      _autoResumeTimer = null;
+      audioEl.currentTime = _autoResumePos;
+      audioEl.play();
+      setClStatus('');
+      return;
+    }
+    setClStatus(`Continuing in ${remaining}…`);
+    remaining--;
+    _autoResumeTimer = setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+function clearAutoResume() {
+  if (_autoResumeTimer) { clearTimeout(_autoResumeTimer); _autoResumeTimer = null; }
+  setClStatus('');
+}
+
+async function runClarify() {
+  if (S.clarifying || !S.book) return;
+  S.clarifying = true;
+  $('clarify-btn').disabled      = true;
+  $('mini-clarify-btn').disabled = true;
+
+  audioEl.pause();
+  clearAutoResume();
+  openClPanel();
+  $('cl-original').textContent   = '…';
+  $('cl-translated').textContent = '';
+  $('cl-explanation').classList.add('hidden');
+  $('cl-terms').classList.add('hidden');
+  setClStatus('Analyzing…', true);
+
+  try {
+    const data = await api('POST', '/api/clarify', { book_id: S.book.id, position_sec: audioEl.currentTime });
+
+    $('cl-src-pill').textContent   = LANG[data.source_lang] || data.source_lang;
+    $('cl-tgt-pill').textContent   = LANG[data.target_lang] || data.target_lang;
+    $('cl-original').textContent   = data.original_text;
+    $('cl-translated').textContent = data.translated_text;
+
+    const expl = $('cl-explanation');
+    if (data.explanation) { expl.textContent = data.explanation; expl.classList.remove('hidden'); }
+    renderClTerms(data.terms || []);
+
+    startAutoResume(data.sentence_start);
+
+  } catch (err) {
+    if (err.message !== 'Unauthorized') setClStatus('error: ' + err.message);
+  } finally {
+    S.clarifying = false;
+    $('clarify-btn').disabled      = false;
+    $('mini-clarify-btn').disabled = false;
+  }
+}
+
+function setClStatus(msg, dot = false) {
+  $('cl-status').innerHTML = dot ? `<span class="cl-status-dot"></span>${msg}` : msg;
+}
+
+$('clarify-btn').addEventListener('click', runClarify);
+$('mini-clarify-btn').addEventListener('click', runClarify);
+
+$('cl-resume-btn').addEventListener('click', () => {
+  clearAutoResume();
+  audioEl.currentTime = _autoResumePos || audioEl.currentTime;
+  audioEl.play();
+});
+$('cl-close-btn').addEventListener('click', () => { clearAutoResume(); closeClPanel(); });
+
+// ── Playlist ──────────────────────────────────────────────────────────────────
+function renderPlaylist() {
+  const container = $('playlist-items');
+  container.innerHTML = '';
+  S.playlistBooks.forEach(b => {
+    const isActive = S.book && b.id === S.book.id;
+    const item = document.createElement('div');
+    item.className = 'pl-item' + (isActive ? ' pl-active' : '');
+    item.innerHTML = `
+      <div class="pl-cover" style="background:${bookGradient(b.title)}">${bookCoverInner(b.title)}</div>
+      <div class="pl-info">
+        <div class="pl-title">${esc(b.title)}</div>
+        <div class="pl-meta">${LANG[b.source_lang] || b.source_lang}${b.duration_sec ? ' · ' + fmt(b.duration_sec) : ''}</div>
+      </div>`;
+    item.addEventListener('click', () => openBook(b, S.playlistCollId));
+    container.appendChild(item);
+  });
+  const active = container.querySelector('.pl-active');
+  if (active) setTimeout(() => active.scrollIntoView({ block: 'center', behavior: 'smooth' }), 80);
+}
+
+function playNext() {
+  if (!S.playlistBooks.length || !S.book) return;
+  let next;
+  if (S.shuffle) {
+    const others = S.playlistBooks.filter(b => b.id !== S.book.id);
+    if (!others.length) return;
+    next = others[Math.floor(Math.random() * others.length)];
+  } else {
+    const idx = S.playlistBooks.findIndex(b => b.id === S.book.id);
+    if (idx === -1 || idx >= S.playlistBooks.length - 1) return;
+    next = S.playlistBooks[idx + 1];
+  }
+  openBook(next, S.playlistCollId);
+}
+
+function playPrev() {
+  if (!S.playlistBooks.length || !S.book) return;
+  const idx = S.playlistBooks.findIndex(b => b.id === S.book.id);
+  if (idx <= 0) return;
+  openBook(S.playlistBooks[idx - 1], S.playlistCollId);
+}
+
+$('mini-prev-btn').addEventListener('click', playPrev);
+$('mini-next-btn').addEventListener('click', playNext);
+
+$('pl-shuffle-btn').addEventListener('click', () => {
+  S.shuffle = !S.shuffle;
+  $('pl-shuffle-btn').classList.toggle('active', S.shuffle);
+});
+
+audioEl.addEventListener('ended', () => { if (S.playlistBooks.length > 1) playNext(); });
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === ' ')          { e.preventDefault(); if (S.book) { clearAutoResume(); audioEl.paused ? audioEl.play() : audioEl.pause(); } }
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); if (S.book) audioEl.currentTime = Math.max(0, audioEl.currentTime - 15); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); if (S.book) audioEl.currentTime = Math.min(audioEl.duration || 0, audioEl.currentTime + 15); }
+  if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey) { if (S.book && !S.clarifying) runClarify(); }
+  if (e.key === ',') { e.preventDefault(); jumpSentence(-1); }
+  if (e.key === '.') { e.preventDefault(); jumpSentence(1); }
+  if (e.key === 'Escape') {
+    if (!$('pf-clarify-panel').classList.contains('hidden')) { closeClPanel(); return; }
+    if (!$('pf-right-panel').classList.contains('hidden')) { hideRightPanel(); return; }
+    if (S.playerOpen) closeFullPlayer();
+  }
+});
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+function onUnauthorized() {
+  S.currentUser = null;
+  showLogin();
+}
+
+function showLogin() {
+  $('app').classList.add('hidden');
+  $('login-page').classList.remove('hidden');
+  $('login-error').textContent = '';
+}
+
+function showApp() {
+  $('login-page').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  if (S.currentUser) $('sidebar-username').textContent = S.currentUser.username;
+}
+
+async function checkAuth() {
+  try {
+    const user = await api('GET', '/api/auth/me');
+    S.currentUser = user;
+    showApp();
+    loadAll();
+  } catch {
+    showLogin();
+  }
+}
+
+$('login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const username = $('login-username').value.trim();
+  const password = $('login-password').value;
+  const errEl    = $('login-error');
+  errEl.textContent = '';
+  if (!username || !password) { errEl.textContent = 'Enter username and password.'; return; }
+  const btn = $('login-submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  try {
+    const user = await api('POST', '/api/auth/login', { username, password });
+    S.currentUser = user;
+    showApp();
+    loadAll();
+  } catch (err) {
+    let msg = 'Invalid username or password.';
+    try { const p = JSON.parse(err.message); if (p.detail) msg = p.detail; } catch {}
+    if (msg.toLowerCase().includes('locked')) msg = 'Account temporarily locked. Try again later.';
+    errEl.textContent = msg;
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  }
+});
+
+$('logout-btn').addEventListener('click', async () => {
+  try { await api('POST', '/api/auth/logout'); } catch {}
+  S.currentUser = null;
+  S.books = [];
+  S.collections = [];
+  S.book = null;
+  showLogin();
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+setGreeting();
+checkAuth();

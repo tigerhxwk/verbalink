@@ -1,0 +1,52 @@
+services:
+  web:
+    build: services/web
+    ports:
+      - "7080:80"
+    depends_on:
+      - backend
+    networks:
+      - verbalink-net
+
+  backend:
+    build: services/backend
+    environment:
+      LLM_BASE_URL: "${LLM_BASE_URL:-http://llama-server:8080/v1}"
+      LLM_MODEL: "${LLM_MODEL:-qwen3.6-35b}"
+      TTS_URL: "http://tts:8001"
+      TRANSCRIPTION_URL: "http://transcription:8002"
+      DATA_DIR: "/data"
+    volumes:
+      - ./data:/data
+    networks:
+      - verbalink-net
+    depends_on:
+      llama-server:
+        condition: service_healthy
+        required: false
+
+  tts:
+    build: services/tts
+    volumes:
+      - tts_models:/models
+    networks:
+      - verbalink-net
+
+  transcription:
+    build: services/transcription
+    environment:
+      WHISPER_MODEL: "${WHISPER_MODEL:-medium}"
+      DATA_DIR: "/data"
+    volumes:
+      - ./data:/data
+      - whisper_models:/models
+    networks:
+      - verbalink-net
+
+volumes:
+  tts_models:
+  whisper_models:
+
+networks:
+  verbalink-net:
+    driver: bridge

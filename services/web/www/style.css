@@ -1297,7 +1297,8 @@ select:focus { border-color: var(--blue); }
   display: flex; align-items: center; justify-content: center;
   transition: background var(--t-fast), color var(--t-fast);
 }
-.cl-tts-btn:hover { background: var(--surface-3); color: var(--amber); }
+.cl-tts-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--amber); }
+.cl-tts-btn:disabled { opacity: 0.35; cursor: default; }
 .cl-divider { height: 1px; background: var(--border); margin: 16px 0; }
 
 /* ── Actions row (cancel + resume) ─────────────────────────────────────────── */

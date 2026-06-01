@@ -937,8 +937,8 @@ async function runClarify() {
   $('mini-clarify-btn').disabled = true;
   _audioOrigB64 = null;
   _audioTrlB64  = null;
-  $('cl-tts-orig').classList.add('hidden');
-  $('cl-tts-trl').classList.add('hidden');
+  $('cl-tts-orig').disabled = true;
+  $('cl-tts-trl').disabled  = true;
 
   audioEl.pause();
   clearAutoResume();
@@ -964,11 +964,12 @@ async function runClarify() {
           renderClTerms(ev.terms || []);
           setClStatus('');
           expl.classList.remove('hidden');
-          _audioOrigB64 = ev.audio_original  || null;
-          _audioTrlB64  = ev.audio_translated || null;
-          if (_audioOrigB64) $('cl-tts-orig').classList.remove('hidden');
-          if (_audioTrlB64)  $('cl-tts-trl').classList.remove('hidden');
+          _audioOrigB64 = ev.audio_original || null;
+          $('cl-tts-orig').disabled = !_audioOrigB64;
           startAutoResume(ev.sentence_start);
+        } else if (ev.type === 'tts_translated') {
+          _audioTrlB64 = ev.audio || null;
+          $('cl-tts-trl').disabled = !_audioTrlB64;
         } else if (ev.type === 'token') {
           expl.textContent += ev.text;
         }

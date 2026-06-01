@@ -515,7 +515,12 @@ async def _llm_call(prompt: str, max_tokens: int = 2000) -> str:
             },
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        # Strip <think>...</think> block from reasoning models
+        think_end = text.find("</think>")
+        if think_end != -1:
+            text = text[think_end + 8:].lstrip()
+        return text
 
 
 async def _llm_stream(messages: list, max_tokens: int = 1200):
@@ -1145,25 +1150,8 @@ async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current
     src = LANG_NAMES.get(source_lang, source_lang)
     tgt = LANG_NAMES.get(target_lang, target_lang)
 
-    # Build translation + terms (fast, non-streaming call)
-    analysis = await _analyze_sentence(original, source_lang, target_lang, mode=req.mode)
-    terms = analysis.get("terms", [])
-    if terms:
-        ud_tasks = [_urban_dict(t["term"]) if t.get("is_slang") else asyncio.sleep(0, result=None) for t in terms]
-        ud_results = await asyncio.gather(*ud_tasks, return_exceptions=True)
-        for t, ud in zip(terms, ud_results):
-            if isinstance(ud, str) and ud:
-                t["urban"] = ud
-
-    audio_translated = None
+    # TTS for original (fast, parallel with LLM stream start)
     audio_original = None
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{TTS_URL}/synthesize", json={"text": analysis["translation"], "lang": target_lang})
-            r.raise_for_status()
-            audio_translated = base64.b64encode(r.content).decode()
-    except Exception:
-        pass
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(f"{TTS_URL}/synthesize", json={"text": original, "lang": source_lang})
@@ -1171,41 +1159,86 @@ async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current
             audio_original = base64.b64encode(r.content).decode()
     except Exception:
         pass
+    # audio_translated generated after we have the translation (inside stream)
 
-    meta = {
-        "original_text":    original,
-        "translated_text":  analysis["translation"],
-        "terms":            terms,
-        "source_lang":      source_lang,
-        "target_lang":      target_lang,
-        "sentence_start":   segment["start"],
-        "sentence_end":     segment["end"],
-        "audio_translated": audio_translated,
-        "audio_original":   audio_original,
-    }
-
+    # Single streaming call: JSON header then explanation tokens
     if req.mode == "beginner":
-        expl_prompt = (
-            f'Sentence in {src}: "{original}"\n'
-            f'Translation: "{analysis["translation"]}"\n\n'
-            f"Explain this sentence in {tgt} for a complete language beginner. Cover:\n"
-            f"- What each key word means\n"
-            f"- How the grammar structure works\n"
-            f"- The overall meaning and any cultural context\n"
-            f"Write naturally, 3-5 sentences. No headers, no markdown."
+        expl_instr = (
+            f"Then on the next lines explain this sentence in {tgt} for a complete language beginner "
+            f"(3-5 sentences): break down key words, grammar structure, meaning and cultural context. "
+            f"Write naturally, no headers, no markdown."
         )
     else:
-        expl_prompt = (
-            f'Sentence in {src}: "{original}"\n'
-            f'Translation: "{analysis["translation"]}"\n\n'
-            f"In {tgt}, write a concise explanation (2-3 sentences) covering meaning, nuance, "
-            f"and cultural context if relevant. No markdown."
+        expl_instr = (
+            f"Then on the next lines write a concise explanation in {tgt} (2-3 sentences): "
+            f"meaning, nuance, cultural context if relevant. No markdown."
         )
 
+    stream_prompt = (
+        f'Sentence in {src}: "{original}"\n\n'
+        f"Output ONLY this exact format — no extra text:\n"
+        f'{{"translation":"<{tgt} translation>","terms":[{{"term":"<term>","meaning":"<{tgt} meaning>","is_slang":false}}]}}\n'
+        f"---\n"
+        f"{expl_instr}\n\n"
+        f"Terms: only idioms, slang, or culturally-specific expressions. Empty array if none."
+    )
+
+    base_meta = {
+        "original_text":  original,
+        "source_lang":    source_lang,
+        "target_lang":    target_lang,
+        "sentence_start": segment["start"],
+        "sentence_end":   segment["end"],
+        "audio_original": audio_original,
+    }
+
     async def generate():
-        yield f"data: {json.dumps({'type': 'meta', **meta})}\n\n"
-        async for token in _llm_stream([{"role": "user", "content": expl_prompt}]):
-            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+        header_buf = ""
+        header_done = False
+        async for token in _llm_stream([{"role": "user", "content": stream_prompt}], max_tokens=1000):
+            if not header_done:
+                header_buf += token
+                if "---" in header_buf:
+                    header_done = True
+                    parts = header_buf.split("---", 1)
+                    # Parse JSON header
+                    try:
+                        m = re.search(r'\{.*\}', parts[0], re.DOTALL)
+                        parsed = json.loads(m.group()) if m else {}
+                    except Exception:
+                        parsed = {}
+                    translation = parsed.get("translation", "")
+                    meta_event = {**base_meta,
+                                  "translated_text": translation,
+                                  "terms": parsed.get("terms", [])}
+                    yield f"data: {json.dumps({'type': 'meta', **meta_event})}\n\n"
+                    # TTS for translation — send as separate event
+                    try:
+                        async with httpx.AsyncClient(timeout=60) as _c:
+                            _r = await _c.post(f"{TTS_URL}/synthesize",
+                                               json={"text": translation, "lang": target_lang})
+                            _r.raise_for_status()
+                            audio_trl = base64.b64encode(_r.content).decode()
+                        yield f"data: {json.dumps({'type': 'tts_translated', 'audio': audio_trl})}\n\n"
+                    except Exception:
+                        pass
+                    # Emit any explanation tokens that came after ---
+                    after = parts[1].lstrip("\n")
+                    if after:
+                        yield f"data: {json.dumps({'type': 'token', 'text': after})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+        if not header_done:
+            # Model didn't output separator — emit what we have as translation fallback
+            try:
+                m = re.search(r'\{.*\}', header_buf, re.DOTALL)
+                parsed = json.loads(m.group()) if m else {}
+            except Exception:
+                parsed = {}
+            meta_event = {**base_meta,
+                          "translated_text": parsed.get("translation", header_buf.strip()),
+                          "terms": parsed.get("terms", [])}
+            yield f"data: {json.dumps({'type': 'meta', **meta_event})}\n\n"
         yield "data: {\"type\":\"done\"}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream",

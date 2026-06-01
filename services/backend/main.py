@@ -20,7 +20,7 @@ import httpx
 import jwt
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from ldap3 import Connection as LdapConn, NONE as LDAP_NONE, Server as LdapServer, SUBTREE
 from passlib.context import CryptContext
 from pydantic import BaseModel, field_validator
@@ -68,6 +68,11 @@ LANG_NAMES = {
 }
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# In-memory chat history per (user_id, book_id) — resets on server restart
+# Each value: list of {"role": "user"|"assistant", "content": str}
+_chat_history: dict[str, list] = {}
+CHAT_HISTORY_MAX = 20  # messages to keep
 
 # Brute-force protection (in-memory)
 _bf_attempts: dict = {}
@@ -146,6 +151,10 @@ def init_db():
         "ALTER TABLE books ADD COLUMN user_id TEXT",
         "ALTER TABLE collections ADD COLUMN user_id TEXT",
         "ALTER TABLE books ADD COLUMN translation_status TEXT DEFAULT 'none'",
+        "ALTER TABLE books ADD COLUMN progress_sec REAL DEFAULT 0",
+        "ALTER TABLE books ADD COLUMN playback_speed REAL DEFAULT 1.0",
+        "ALTER TABLE books ADD COLUMN volume REAL DEFAULT 1.0",
+        "ALTER TABLE books ADD COLUMN clarify_mode TEXT DEFAULT 'advanced'",
     ]:
         try:
             conn.execute(migration)
@@ -485,15 +494,72 @@ async def _llm_call(prompt: str, max_tokens: int = 2000) -> str:
         return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-async def _analyze_sentence(text: str, source_lang: str, target_lang: str) -> dict:
+async def _llm_stream(messages: list, max_tokens: int = 1200):
+    """Async generator yielding clean text tokens (thinking stripped) from streaming LLM."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
+        async with client.stream(
+            "POST", f"{LLM_BASE_URL}/chat/completions",
+            headers={"Authorization": "Bearer none"},
+            json={"model": LLM_MODEL, "messages": messages, "temperature": 0.3,
+                  "max_tokens": max_tokens, "stream": True},
+        ) as resp:
+            resp.raise_for_status()
+            buf = ""
+            thinking_done = False
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: ") or line == "data: [DONE]":
+                    continue
+                try:
+                    token = json.loads(line[6:])["choices"][0]["delta"].get("content") or ""
+                    if not token:
+                        continue
+                    if not thinking_done:
+                        buf += token
+                        if "</think>" in buf:
+                            thinking_done = True
+                            after = buf.split("</think>", 1)[1].lstrip("\n")
+                            if after:
+                                yield after
+                    else:
+                        yield token
+                except Exception:
+                    pass
+
+
+def _merge_comma_segments(segments: list) -> list:
+    """Merge whisper segments that end with commas/semicolons into complete sentences."""
+    if not segments:
+        return segments
+    merged = []
+    cur = dict(segments[0])
+    for seg in segments[1:]:
+        txt = cur["text"].strip()
+        if txt and txt[-1] in (",", ";") or (len(txt) < 3):
+            cur["text"] = txt + " " + seg["text"].strip()
+            cur["end"] = seg["end"]
+        else:
+            merged.append(cur)
+            cur = dict(seg)
+    merged.append(cur)
+    return merged
+
+
+async def _analyze_sentence(text: str, source_lang: str, target_lang: str, mode: str = "advanced") -> dict:
     src = LANG_NAMES.get(source_lang, source_lang)
     tgt = LANG_NAMES.get(target_lang, target_lang)
+    if mode == "beginner":
+        expl_instr = (
+            f"<2-3 sentence {tgt} explanation for a complete language beginner: "
+            f"break down the grammar structure, explain each key word's meaning, "
+            f"describe the sentence construction, and note any cultural context>"
+        )
+    else:
+        expl_instr = f"<1–2 sentence {tgt} explanation of meaning and any cultural context>"
     prompt = (
         f'You are a language tutor. Analyze this {src} sentence:\n\n"{text}"\n\n'
         f"Return ONLY valid JSON, no markdown, no other text:\n"
-        f'{{"translation":"<full {tgt} translation>","explanation":"<1–2 sentence {tgt} explanation of '
-        f'meaning and any cultural context>","terms":[{{"term":"<original term>","meaning":"<{tgt} '
-        f'explanation>","is_slang":false}}]}}\n'
+        f'{{"translation":"<full {tgt} translation>","explanation":"{expl_instr}",'
+        f'"terms":[{{"term":"<original term>","meaning":"<{tgt} explanation>","is_slang":false}}]}}\n'
         f"Include in \"terms\" only idioms, slang, phraseological units, or culturally-specific expressions. "
         f"Empty array if none."
     )
@@ -682,7 +748,7 @@ async def upload_book(
 async def list_books(user: dict = Depends(current_user)):
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, title, duration_sec, source_lang, target_lang, transcription_status, translation_status, error, created_at FROM books WHERE user_id=? ORDER BY created_at DESC",
+        "SELECT id, title, duration_sec, source_lang, target_lang, transcription_status, translation_status, error, created_at, progress_sec, playback_speed, volume, clarify_mode FROM books WHERE user_id=? ORDER BY created_at DESC",
         (user["id"],),
     ).fetchall()
     conn.close()
@@ -721,6 +787,55 @@ async def patch_book(book_id: str, body: BookPatch, user: dict = Depends(current
     result = dict(conn.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone())
     conn.close()
     return result
+
+
+class BookSettings(BaseModel):
+    progress_sec:   Optional[float] = None
+    playback_speed: Optional[float] = None
+    volume:         Optional[float] = None
+    clarify_mode:   Optional[str]   = None
+    source_lang:    Optional[str]   = None
+    target_lang:    Optional[str]   = None
+
+
+@app.get("/api/books/{book_id}/settings")
+async def get_book_settings(book_id: str, user: dict = Depends(current_user)):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT source_lang, target_lang, progress_sec, playback_speed, volume, clarify_mode "
+        "FROM books WHERE id=? AND user_id=?", (book_id, user["id"])
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404)
+    return dict(row)
+
+
+@app.put("/api/books/{book_id}/settings")
+async def save_book_settings(book_id: str, body: BookSettings, user: dict = Depends(current_user)):
+    conn = get_db()
+    if not conn.execute("SELECT id FROM books WHERE id=? AND user_id=?", (book_id, user["id"])).fetchone():
+        conn.close()
+        raise HTTPException(404)
+    fields = []
+    values = []
+    for col, val in [
+        ("progress_sec",   body.progress_sec),
+        ("playback_speed", body.playback_speed),
+        ("volume",         body.volume),
+        ("clarify_mode",   body.clarify_mode),
+        ("source_lang",    body.source_lang),
+        ("target_lang",    body.target_lang),
+    ]:
+        if val is not None:
+            fields.append(f"{col}=?")
+            values.append(val)
+    if fields:
+        values.append(book_id)
+        conn.execute(f"UPDATE books SET {', '.join(fields)} WHERE id=?", values)
+        conn.commit()
+    conn.close()
+    return {"status": "saved"}
 
 
 @app.post("/api/books/{book_id}/retranscribe")
@@ -893,39 +1008,38 @@ async def remove_book_from_collection(coll_id: str, book_id: str, user: dict = D
 class ClarifyRequest(BaseModel):
     book_id: str
     position_sec: float
+    mode: str = "advanced"  # "advanced" | "beginner"
 
 
-@app.post("/api/clarify")
-async def clarify(req: ClarifyRequest, user: dict = Depends(current_user)):
+async def _load_segment(book_id: str, user_id: str, position_sec: float):
+    """Load book + transcript, merge comma segments, return (segment, source_lang, target_lang)."""
     conn = get_db()
     row = conn.execute(
         "SELECT source_lang, target_lang, transcription_status FROM books WHERE id=? AND user_id=?",
-        (req.book_id, user["id"]),
+        (book_id, user_id),
     ).fetchone()
     conn.close()
     if not row:
         raise HTTPException(404)
     if row["transcription_status"] != "done":
         raise HTTPException(400, "Transcript not ready yet")
-
-    path = TRANSCRIPTS_DIR / f"{req.book_id}.json"
+    path = TRANSCRIPTS_DIR / f"{book_id}.json"
     async with aiofiles.open(path) as f:
         transcript = json.loads(await f.read())
-
-    segments = transcript["segments"]
-    done = [s for s in segments if s["end"] <= req.position_sec]
+    segments = _merge_comma_segments(transcript["segments"])
+    done = [s for s in segments if s["end"] <= position_sec]
     if not done:
         raise HTTPException(400, "No complete sentence before this position")
+    return done[-1], row["source_lang"], row["target_lang"]
 
-    segment     = done[-1]
-    original    = segment["text"].strip()
-    source_lang = row["source_lang"]
-    target_lang = row["target_lang"]
 
-    # Rich analysis: translation + explanation + phraseological terms
-    analysis = await _analyze_sentence(original, source_lang, target_lang)
+@app.post("/api/clarify")
+async def clarify(req: ClarifyRequest, user: dict = Depends(current_user)):
+    segment, source_lang, target_lang = await _load_segment(req.book_id, user["id"], req.position_sec)
+    original = segment["text"].strip()
 
-    # UrbanDictionary lookup for slang terms (best-effort, parallel)
+    analysis = await _analyze_sentence(original, source_lang, target_lang, mode=req.mode)
+
     terms = analysis.get("terms", [])
     if terms:
         ud_tasks = [
@@ -937,30 +1051,190 @@ async def clarify(req: ClarifyRequest, user: dict = Depends(current_user)):
             if isinstance(ud, str) and ud:
                 t["urban"] = ud
 
-    # TTS for the translation (best-effort — no TTS service in dev)
-    audio_b64 = None
+    # TTS for translated text
+    audio_translated = None
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            tts = await client.post(
-                f"{TTS_URL}/synthesize",
-                json={"text": analysis["translation"], "lang": target_lang},
-            )
+            tts = await client.post(f"{TTS_URL}/synthesize",
+                                    json={"text": analysis["translation"], "lang": target_lang})
             tts.raise_for_status()
-            audio_b64 = base64.b64encode(tts.content).decode()
+            audio_translated = base64.b64encode(tts.content).decode()
+    except Exception:
+        pass
+
+    # TTS for original text
+    audio_original = None
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            tts = await client.post(f"{TTS_URL}/synthesize",
+                                    json={"text": original, "lang": source_lang})
+            tts.raise_for_status()
+            audio_original = base64.b64encode(tts.content).decode()
     except Exception:
         pass
 
     return {
-        "original_text":   original,
-        "translated_text": analysis["translation"],
-        "explanation":     analysis.get("explanation", ""),
-        "terms":           terms,
-        "source_lang":     source_lang,
-        "target_lang":     target_lang,
-        "sentence_start":  segment["start"],
-        "sentence_end":    segment["end"],
-        "audio_translated": audio_b64,
+        "original_text":    original,
+        "translated_text":  analysis["translation"],
+        "explanation":      analysis.get("explanation", ""),
+        "terms":            terms,
+        "source_lang":      source_lang,
+        "target_lang":      target_lang,
+        "sentence_start":   segment["start"],
+        "sentence_end":     segment["end"],
+        "audio_translated": audio_translated,
+        "audio_original":   audio_original,
     }
+
+
+class ClarifyStreamRequest(BaseModel):
+    book_id: str
+    position_sec: float
+    mode: str = "advanced"
+
+
+@app.post("/api/clarify/stream")
+async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current_user)):
+    """Stream the full clarify response as SSE: first a 'meta' event with JSON data,
+    then 'token' events for the explanation, then 'done'."""
+    segment, source_lang, target_lang = await _load_segment(req.book_id, user["id"], req.position_sec)
+    original = segment["text"].strip()
+    src = LANG_NAMES.get(source_lang, source_lang)
+    tgt = LANG_NAMES.get(target_lang, target_lang)
+
+    # Build translation + terms (fast, non-streaming call)
+    analysis = await _analyze_sentence(original, source_lang, target_lang, mode=req.mode)
+    terms = analysis.get("terms", [])
+    if terms:
+        ud_tasks = [_urban_dict(t["term"]) if t.get("is_slang") else asyncio.sleep(0, result=None) for t in terms]
+        ud_results = await asyncio.gather(*ud_tasks, return_exceptions=True)
+        for t, ud in zip(terms, ud_results):
+            if isinstance(ud, str) and ud:
+                t["urban"] = ud
+
+    audio_translated = None
+    audio_original = None
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(f"{TTS_URL}/synthesize", json={"text": analysis["translation"], "lang": target_lang})
+            r.raise_for_status()
+            audio_translated = base64.b64encode(r.content).decode()
+    except Exception:
+        pass
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(f"{TTS_URL}/synthesize", json={"text": original, "lang": source_lang})
+            r.raise_for_status()
+            audio_original = base64.b64encode(r.content).decode()
+    except Exception:
+        pass
+
+    meta = {
+        "original_text":    original,
+        "translated_text":  analysis["translation"],
+        "terms":            terms,
+        "source_lang":      source_lang,
+        "target_lang":      target_lang,
+        "sentence_start":   segment["start"],
+        "sentence_end":     segment["end"],
+        "audio_translated": audio_translated,
+        "audio_original":   audio_original,
+    }
+
+    if req.mode == "beginner":
+        expl_prompt = (
+            f'Sentence in {src}: "{original}"\n'
+            f'Translation: "{analysis["translation"]}"\n\n'
+            f"Explain this sentence in {tgt} for a complete language beginner. Cover:\n"
+            f"- What each key word means\n"
+            f"- How the grammar structure works\n"
+            f"- The overall meaning and any cultural context\n"
+            f"Write naturally, 3-5 sentences. No headers, no markdown."
+        )
+    else:
+        expl_prompt = (
+            f'Sentence in {src}: "{original}"\n'
+            f'Translation: "{analysis["translation"]}"\n\n'
+            f"In {tgt}, write a concise explanation (2-3 sentences) covering meaning, nuance, "
+            f"and cultural context if relevant. No markdown."
+        )
+
+    async def generate():
+        yield f"data: {json.dumps({'type': 'meta', **meta})}\n\n"
+        async for token in _llm_stream([{"role": "user", "content": expl_prompt}]):
+            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+        yield "data: {\"type\":\"done\"}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class ChatRequest(BaseModel):
+    book_id: str
+    message: str
+    position_sec: float = 0.0
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
+    """Stream a dialogue response about the current book passage. Maintains per-session history."""
+    conn = get_db()
+    row = conn.execute("SELECT source_lang, target_lang, title FROM books WHERE id=? AND user_id=?",
+                       (req.book_id, user["id"])).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404)
+
+    tgt = LANG_NAMES.get(row["target_lang"], row["target_lang"])
+    src = LANG_NAMES.get(row["source_lang"], row["source_lang"])
+    hist_key = f"{user['id']}:{req.book_id}"
+    history = _chat_history.setdefault(hist_key, [])
+
+    # Try to get context segment
+    context_text = ""
+    try:
+        path = TRANSCRIPTS_DIR / f"{req.book_id}.json"
+        async with aiofiles.open(path) as f:
+            transcript = json.loads(await f.read())
+        segments = _merge_comma_segments(transcript["segments"])
+        done = [s for s in segments if s["end"] <= req.position_sec]
+        if done:
+            # Include last 3 sentences as context
+            context_segs = done[-3:]
+            context_text = " ".join(s["text"].strip() for s in context_segs)
+    except Exception:
+        pass
+
+    system_msg = (
+        f'You are a language tutor helping a student learn {src} through the audiobook "{row["title"]}".\n'
+        f"Answer in {tgt}. Be concise and educational.\n"
+        + (f'Current passage: "{context_text}"\n' if context_text else "")
+    )
+
+    messages = [{"role": "system", "content": system_msg}] + history + [{"role": "user", "content": req.message}]
+
+    async def generate():
+        full_response = []
+        async for token in _llm_stream(messages, max_tokens=600):
+            full_response.append(token)
+            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+        yield "data: {\"type\":\"done\"}\n\n"
+        # Save to history
+        history.append({"role": "user", "content": req.message})
+        history.append({"role": "assistant", "content": "".join(full_response)})
+        # Keep last N messages
+        if len(history) > CHAT_HISTORY_MAX:
+            _chat_history[hist_key] = history[-CHAT_HISTORY_MAX:]
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.delete("/api/chat/{book_id}")
+async def clear_chat(book_id: str, user: dict = Depends(current_user)):
+    """Clear chat history for a book."""
+    _chat_history.pop(f"{user['id']}:{book_id}", None)
+    return {"status": "cleared"}
 
 
 async def _translate(text: str, source_lang: str, target_lang: str) -> str:

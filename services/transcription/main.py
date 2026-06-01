@@ -38,11 +38,34 @@ class TranscribeRequest(BaseModel):
     book_id: str
 
 
+def _merge_comma_segments(segments):
+    if not segments:
+        return segments
+    merged = []
+    cur = dict(segments[0])
+    for seg in segments[1:]:
+        txt = cur["text"].strip()
+        if txt and txt[-1] in (",", ";"):
+            cur["text"] = txt + " " + seg["text"].strip()
+            cur["end"] = seg["end"]
+        else:
+            merged.append(cur)
+            cur = dict(seg)
+    merged.append(cur)
+    return merged
+
+
 def _do_transcribe(file_path: str, book_id: str) -> dict:
     segments_out = []
-    segments, info = model.transcribe(file_path, beam_size=5, vad_filter=True)
+    segments, info = model.transcribe(
+        file_path,
+        beam_size=5,
+        vad_filter=True,
+        condition_on_previous_text=True,
+    )
     for seg in segments:
         segments_out.append({"id": seg.id, "start": round(seg.start, 3), "end": round(seg.end, 3), "text": seg.text})
+    segments_out = _merge_comma_segments(segments_out)
 
     out_path = TRANSCRIPTS_DIR / f"{book_id}.json"
     with open(out_path, "w", encoding="utf-8") as f:

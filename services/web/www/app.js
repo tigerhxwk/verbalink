@@ -524,6 +524,17 @@ async function deleteBook(id) {
   await loadAll();
 }
 
+// ── Book settings persistence ─────────────────────────────────────────────────
+let _settingsSaveTimer = null;
+
+function saveBookSettings(patch) {
+  if (!S.book) return;
+  clearTimeout(_settingsSaveTimer);
+  _settingsSaveTimer = setTimeout(async () => {
+    try { await api('PUT', `/api/books/${S.book.id}/settings`, patch); } catch {}
+  }, 800);
+}
+
 // ── Open book / player ────────────────────────────────────────────────────────
 async function openBook(book, collId = null) {
   S.book = book;
@@ -549,13 +560,41 @@ async function openBook(book, collId = null) {
   $('mini-title').textContent    = book.title;
   $('mini-sub').textContent      = LANG[book.source_lang] || book.source_lang;
 
-  // Sync target lang selector
-  $('pf-tgt-sel').value = book.target_lang || 'en';
-
-  audioEl.src = `/api/books/${book.id}/audio`;
-  audioEl.load();
-  const saved = savedPos(book.id);
-  if (saved > 0) audioEl.addEventListener('loadedmetadata', () => { audioEl.currentTime = saved; }, { once: true });
+  // Load per-book settings from DB
+  try {
+    const s = await api('GET', `/api/books/${book.id}/settings`);
+    // Playback speed
+    const speed = s.playback_speed || 1.0;
+    audioEl.playbackRate = speed;
+    $('speed-bar').value = speed;
+    $('speed-val').textContent = speed.toFixed(2).replace(/\.?0+$/, '') + '×';
+    // Volume
+    const vol = s.volume ?? 1.0;
+    audioEl.volume = vol;
+    $('volume-bar').value = vol;
+    updateVolUI(vol);
+    // Clarify mode
+    if (s.clarify_mode) setClarifyMode(s.clarify_mode);
+    // Target lang
+    $('pf-tgt-sel').value = s.target_lang || book.target_lang || 'en';
+    // Progress
+    const prog = s.progress_sec || savedPos(book.id) || 0;
+    if (prog > 0) {
+      audioEl.src = `/api/books/${book.id}/audio`;
+      audioEl.load();
+      audioEl.addEventListener('loadedmetadata', () => { audioEl.currentTime = prog; }, { once: true });
+    } else {
+      audioEl.src = `/api/books/${book.id}/audio`;
+      audioEl.load();
+    }
+  } catch {
+    // Fallback to localStorage
+    $('pf-tgt-sel').value = book.target_lang || 'en';
+    audioEl.src = `/api/books/${book.id}/audio`;
+    audioEl.load();
+    const saved = savedPos(book.id);
+    if (saved > 0) audioEl.addEventListener('loadedmetadata', () => { audioEl.currentTime = saved; }, { once: true });
+  }
 
   miniPlayer.classList.remove('hidden');
   openFullPlayer();
@@ -634,7 +673,7 @@ audioEl.addEventListener('timeupdate', () => {
   $('time-cur').textContent     = fmt(t);
   $('mini-seek-fill').style.width = (t / dur * 100).toFixed(2) + '%';
   updateActive(t);
-  if (S.book) savePos(S.book.id, t);
+  if (S.book) { savePos(S.book.id, t); saveBookSettings({ progress_sec: t }); }
 });
 
 const PLAY_SVG  = `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
@@ -659,6 +698,7 @@ $('speed-bar').addEventListener('input', () => {
   const v = parseFloat($('speed-bar').value);
   audioEl.playbackRate = v;
   $('speed-val').textContent = v.toFixed(2).replace(/\.?0+$/, '') + '×';
+  saveBookSettings({ playback_speed: v });
 });
 
 const VOL_SVG_ON  = `<svg id="vol-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
@@ -674,6 +714,7 @@ $('volume-bar').addEventListener('input', () => {
   const v = parseFloat($('volume-bar').value);
   audioEl.volume = v;
   updateVolUI(v);
+  saveBookSettings({ volume: v });
 });
 
 let _prevVol = 1;
@@ -773,6 +814,36 @@ function renderClTerms(terms) {
     </div>`).join('');
 }
 
+// ── Clarify mode ──────────────────────────────────────────────────────────────
+let _clarifyMode = localStorage.getItem('clarify_mode') || 'advanced';
+
+function setClarifyMode(mode, persist = false) {
+  _clarifyMode = mode;
+  localStorage.setItem('clarify_mode', mode);
+  document.querySelectorAll('.cl-mode-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === mode)
+  );
+  if (persist) saveBookSettings({ clarify_mode: mode });
+}
+setClarifyMode(_clarifyMode);
+
+document.querySelectorAll('.cl-mode-btn').forEach(b =>
+  b.addEventListener('click', () => setClarifyMode(b.dataset.mode, true))
+);
+
+// ── TTS playback ──────────────────────────────────────────────────────────────
+let _audioOrigB64 = null;
+let _audioTrlB64  = null;
+
+function playB64Audio(b64) {
+  if (!b64) return;
+  const blob = b64Blob(b64, 'audio/wav');
+  playBlob(blob);
+}
+
+$('cl-tts-orig').addEventListener('click', () => playB64Audio(_audioOrigB64));
+$('cl-tts-trl').addEventListener('click',  () => playB64Audio(_audioTrlB64));
+
 // ── Auto-resume countdown ──────────────────────────────────────────────────────
 let _autoResumeTimer = null;
 let _autoResumePos   = 0;
@@ -780,10 +851,12 @@ let _autoResumePos   = 0;
 function startAutoResume(position, secs = 10) {
   clearAutoResume();
   _autoResumePos = position;
+  $('cl-cancel-btn').classList.remove('hidden');
   let remaining = secs;
   const tick = () => {
     if (remaining <= 0) {
       _autoResumeTimer = null;
+      $('cl-cancel-btn').classList.add('hidden');
       audioEl.currentTime = _autoResumePos;
       audioEl.play();
       setClStatus('');
@@ -798,7 +871,35 @@ function startAutoResume(position, secs = 10) {
 
 function clearAutoResume() {
   if (_autoResumeTimer) { clearTimeout(_autoResumeTimer); _autoResumeTimer = null; }
+  $('cl-cancel-btn').classList.add('hidden');
   setClStatus('');
+}
+
+// ── Streaming helper ──────────────────────────────────────────────────────────
+async function streamPost(path, body, onEvent) {
+  const resp = await fetch(path, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (resp.status === 401) { onUnauthorized(); throw new Error('Unauthorized'); }
+  if (!resp.ok) throw new Error(await resp.text());
+  const reader  = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { onEvent(JSON.parse(line.slice(6))); } catch {}
+      }
+    }
+  }
 }
 
 async function runClarify() {
@@ -806,29 +907,45 @@ async function runClarify() {
   S.clarifying = true;
   $('clarify-btn').disabled      = true;
   $('mini-clarify-btn').disabled = true;
+  _audioOrigB64 = null;
+  _audioTrlB64  = null;
+  $('cl-tts-orig').classList.add('hidden');
+  $('cl-tts-trl').classList.add('hidden');
 
   audioEl.pause();
   clearAutoResume();
   openClPanel();
   $('cl-original').textContent   = '…';
   $('cl-translated').textContent = '';
+  $('cl-explanation').textContent = '';
   $('cl-explanation').classList.add('hidden');
   $('cl-terms').classList.add('hidden');
   setClStatus('Analyzing…', true);
 
   try {
-    const data = await api('POST', '/api/clarify', { book_id: S.book.id, position_sec: audioEl.currentTime });
-
-    $('cl-src-pill').textContent   = LANG[data.source_lang] || data.source_lang;
-    $('cl-tgt-pill').textContent   = LANG[data.target_lang] || data.target_lang;
-    $('cl-original').textContent   = data.original_text;
-    $('cl-translated').textContent = data.translated_text;
-
     const expl = $('cl-explanation');
-    if (data.explanation) { expl.textContent = data.explanation; expl.classList.remove('hidden'); }
-    renderClTerms(data.terms || []);
 
-    startAutoResume(data.sentence_start);
+    await streamPost('/api/clarify/stream',
+      { book_id: S.book.id, position_sec: audioEl.currentTime, mode: _clarifyMode },
+      (ev) => {
+        if (ev.type === 'meta') {
+          $('cl-src-pill').textContent   = LANG[ev.source_lang] || ev.source_lang;
+          $('cl-tgt-pill').textContent   = LANG[ev.target_lang] || ev.target_lang;
+          $('cl-original').textContent   = ev.original_text;
+          $('cl-translated').textContent = ev.translated_text;
+          renderClTerms(ev.terms || []);
+          setClStatus('');
+          expl.classList.remove('hidden');
+          _audioOrigB64 = ev.audio_original  || null;
+          _audioTrlB64  = ev.audio_translated || null;
+          if (_audioOrigB64) $('cl-tts-orig').classList.remove('hidden');
+          if (_audioTrlB64)  $('cl-tts-trl').classList.remove('hidden');
+          startAutoResume(ev.sentence_start);
+        } else if (ev.type === 'token') {
+          expl.textContent += ev.text;
+        }
+      }
+    );
 
   } catch (err) {
     if (err.message !== 'Unauthorized') setClStatus('error: ' + err.message);
@@ -851,7 +968,56 @@ $('cl-resume-btn').addEventListener('click', () => {
   audioEl.currentTime = _autoResumePos || audioEl.currentTime;
   audioEl.play();
 });
+$('cl-cancel-btn').addEventListener('click', () => { clearAutoResume(); });
 $('cl-close-btn').addEventListener('click', () => { clearAutoResume(); closeClPanel(); });
+
+// ── Dialogue ──────────────────────────────────────────────────────────────────
+let _chatStreaming = false;
+
+function appendChatMsg(role, text, streaming = false) {
+  const el = document.createElement('div');
+  el.className = `cl-chat-msg ${role}${streaming ? ' streaming' : ''}`;
+  el.textContent = text;
+  $('cl-chat-messages').appendChild(el);
+  $('cl-chat-messages').scrollTop = $('cl-chat-messages').scrollHeight;
+  return el;
+}
+
+async function sendChat() {
+  if (_chatStreaming || !S.book) return;
+  const input = $('cl-chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  _chatStreaming = true;
+  $('cl-chat-send').disabled = true;
+
+  appendChatMsg('user', msg);
+  const respEl = appendChatMsg('assistant', '', true);
+
+  try {
+    await streamPost('/api/chat/stream',
+      { book_id: S.book.id, message: msg, position_sec: audioEl.currentTime },
+      (ev) => {
+        if (ev.type === 'token') {
+          respEl.textContent += ev.text;
+          $('cl-chat-messages').scrollTop = $('cl-chat-messages').scrollHeight;
+        } else if (ev.type === 'done') {
+          respEl.classList.remove('streaming');
+        }
+      }
+    );
+  } catch (err) {
+    respEl.textContent = 'Error: ' + err.message;
+    respEl.classList.remove('streaming');
+  } finally {
+    _chatStreaming = false;
+    $('cl-chat-send').disabled = false;
+  }
+}
+
+$('cl-chat-send').addEventListener('click', sendChat);
+$('cl-chat-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
 
 // ── Playlist ──────────────────────────────────────────────────────────────────
 function renderPlaylist() {

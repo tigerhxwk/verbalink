@@ -536,7 +536,7 @@ select:focus { border-color: var(--blue); }
   display: flex; align-items: center; justify-content: center;
   border-radius: 50%;
   font-size: 15px;
-  opacity: 0;
+  opacity: 0.7;
   transition: opacity var(--t-fast), color var(--t-fast);
   backdrop-filter: blur(4px);
 }
@@ -1232,6 +1232,133 @@ select:focus { border-color: var(--blue); }
   transition: filter var(--t-fast), transform var(--t-fast);
 }
 .cl-resume:hover { filter: brightness(1.1); transform: translateY(-1px); }
+
+/* ── Mode toggle ───────────────────────────────────────────────────────────── */
+.cl-mode-row {
+  display: flex;
+  gap: 4px;
+}
+.cl-mode-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+.cl-mode-btn.active {
+  background: var(--surface-3);
+  color: var(--text);
+  border-color: var(--glass-border);
+}
+
+/* ── Text row with TTS button ─────────────────────────────────────────────── */
+.cl-text-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 0;
+}
+.cl-text-row .cl-original,
+.cl-text-row .cl-translated {
+  flex: 1;
+  margin-bottom: 0;
+}
+.cl-tts-btn {
+  flex-shrink: 0;
+  margin-top: 6px;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.cl-tts-btn:hover { background: var(--surface-3); color: var(--amber); }
+.cl-divider { height: 1px; background: var(--border); margin: 16px 0; }
+
+/* ── Actions row (cancel + resume) ─────────────────────────────────────────── */
+.cl-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.cl-cancel {
+  font-size: 14px;
+  color: var(--text-3);
+  padding: 8px 16px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: transparent;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.cl-cancel:hover { color: var(--danger); border-color: var(--danger); }
+
+/* ── Dialogue ──────────────────────────────────────────────────────────────── */
+.cl-dialogue {
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cl-chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.cl-chat-msg {
+  font-size: 15px;
+  line-height: 1.6;
+  padding: 10px 14px;
+  border-radius: 10px;
+}
+.cl-chat-msg.user {
+  background: var(--surface-2);
+  color: var(--text);
+  align-self: flex-end;
+  max-width: 85%;
+}
+.cl-chat-msg.assistant {
+  background: transparent;
+  color: var(--text-2);
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  max-width: 95%;
+}
+.cl-chat-msg.streaming { border-color: var(--amber); }
+.cl-chat-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.cl-chat-input {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 15px;
+  color: var(--text);
+  transition: border-color var(--t-fast);
+}
+.cl-chat-input:focus { border-color: var(--amber); outline: none; }
+.cl-chat-send {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  background: var(--amber);
+  color: #1a0e00;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: filter var(--t-fast);
+}
+.cl-chat-send:hover { filter: brightness(1.1); }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
 .modal-bg {

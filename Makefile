@@ -1,6 +1,6 @@
-.PHONY: up up-local down build logs restart
+.PHONY: up down build logs restart
 
-# Serverless: uses external LLM_BASE_URL (set in env or .env file)
+# Set LLM_BASE_URL in .env (e.g. LLM_BASE_URL=http://192.168.1.101:18080/v1)
 up:
 	docker compose up -d
 

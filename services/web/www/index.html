@@ -330,20 +330,47 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             <span class="cl-pill cl-pill-tgt" id="cl-tgt-pill"></span>
           </div>
+          <div class="cl-mode-row">
+            <button class="cl-mode-btn" id="cl-mode-advanced" data-mode="advanced">Advanced</button>
+            <button class="cl-mode-btn" id="cl-mode-beginner" data-mode="beginner">Beginner</button>
+          </div>
           <button class="cl-close" id="cl-close-btn" aria-label="Close">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
-        <p class="cl-original" id="cl-original"></p>
+        <div class="cl-text-row">
+          <p class="cl-original" id="cl-original"></p>
+          <button class="cl-tts-btn hidden" id="cl-tts-orig" title="Listen to original">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+          </button>
+        </div>
         <div class="cl-divider"></div>
-        <p class="cl-translated" id="cl-translated"></p>
+        <div class="cl-text-row">
+          <p class="cl-translated" id="cl-translated"></p>
+          <button class="cl-tts-btn hidden" id="cl-tts-trl" title="Listen to translation">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+          </button>
+        </div>
         <p class="cl-explanation hidden" id="cl-explanation"></p>
         <div class="cl-terms hidden" id="cl-terms"></div>
         <div class="cl-status" id="cl-status"></div>
-        <button class="cl-resume" id="cl-resume-btn">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
-          Resume
-        </button>
+        <div class="cl-actions">
+          <button class="cl-cancel hidden" id="cl-cancel-btn">Cancel</button>
+          <button class="cl-resume" id="cl-resume-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
+            Resume
+          </button>
+        </div>
+        <!-- Dialogue -->
+        <div class="cl-dialogue" id="cl-dialogue">
+          <div class="cl-chat-messages" id="cl-chat-messages"></div>
+          <div class="cl-chat-input-row">
+            <input type="text" class="cl-chat-input" id="cl-chat-input" placeholder="Ask about this passage…" />
+            <button class="cl-chat-send" id="cl-chat-send">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22,2 15,22 11,13 2,9"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
 
     </div>

@@ -157,6 +157,7 @@ async function loadAll() {
   ]);
   render();
   schedulePoll();
+  pollTranscriptionProgress();
 }
 
 function render() {
@@ -173,6 +174,29 @@ function schedulePoll() {
     b.translation_status === 'processing'
   );
   if (needsPoll) S.pollTimer = setTimeout(loadAll, 4000);
+}
+
+function fmtEta(sec) {
+  if (!sec || sec < 5) return 'almost done';
+  if (sec < 60) return `~${sec}s left`;
+  const m = Math.round(sec / 60);
+  return `~${m} min left`;
+}
+
+async function pollTranscriptionProgress() {
+  const processing = S.books.filter(b => b.transcription_status === 'processing');
+  for (const book of processing) {
+    try {
+      const p = await api('GET', `/api/books/${book.id}/transcription-progress`);
+      const bar = $(`tpbar-${book.id}`);
+      const eta = $(`tpeta-${book.id}`);
+      if (bar && p.active) {
+        bar.style.width = (p.pct || 0) + '%';
+        if (eta) eta.textContent = p.eta_sec != null ? fmtEta(p.eta_sec) : '';
+      }
+    } catch {}
+  }
+  if (processing.length) setTimeout(pollTranscriptionProgress, 2000);
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -490,7 +514,8 @@ function makeBookCard(book) {
   const pos = savedPos(book.id);
   const pct = book.duration_sec && pos ? Math.round(pos / book.duration_sec * 100) : 0;
   const dotCls = { done:'dot-done', pending:'dot-pending', processing:'dot-processing', error:'dot-error' }[book.transcription_status] || 'dot-pending';
-  const statusTxt = book.transcription_status === 'processing' ? 'transcribing' : book.transcription_status;
+  const isProcessing = book.transcription_status === 'processing';
+  const statusTxt = isProcessing ? 'transcribing…' : book.transcription_status;
   card.innerHTML = `
     <button class="book-delete" data-id="${book.id}" title="Delete">✕</button>
     <div class="book-card-cover"><div class="book-card-cover-inner" style="background:${bookGradient(book.title)}">${bookCoverInner(book.title)}</div></div>
@@ -500,6 +525,7 @@ function makeBookCard(book) {
         <span class="book-card-lang">${LANG[book.source_lang] || book.source_lang}</span>
         <span class="book-card-status"><span class="status-dot ${dotCls}"></span>${statusTxt}</span>
       </div>
+      ${isProcessing ? `<div class="book-card-transcribe-progress"><div class="book-card-transcribe-bar" id="tpbar-${book.id}" style="width:0%"></div></div><div class="book-card-eta" id="tpeta-${book.id}"></div>` : ''}
       ${pct > 0 ? `<div class="book-card-progress"><div style="width:${pct}%"></div></div>` : ''}
     </div>`;
   card.querySelector('.book-delete').addEventListener('click', e => { e.stopPropagation(); deleteBook(book.id); });
@@ -598,6 +624,8 @@ async function openBook(book, collId = null) {
 
   miniPlayer.classList.remove('hidden');
   openFullPlayer();
+  _essayNotifShown = false;
+  loadLastEssayPos(book.id).catch(() => {});
 
   // Load transcript silently for updateActive (mini-player subtitle)
   try {
@@ -1112,6 +1140,7 @@ async function checkAuth() {
     S.currentUser = user;
     showApp();
     loadAll();
+    loadUserSettings();
   } catch {
     showLogin();
   }
@@ -1149,6 +1178,206 @@ $('logout-btn').addEventListener('click', async () => {
   S.collections = [];
   S.book = null;
   showLogin();
+});
+
+// ── User settings ─────────────────────────────────────────────────────────────
+let _userSettings = { essay_enabled: true, essay_interval_min: 30 };
+
+async function loadUserSettings() {
+  try {
+    _userSettings = await api('GET', '/api/settings');
+    $('settings-essay-enabled').checked = !!_userSettings.essay_enabled;
+    $('settings-essay-interval').value  = String(_userSettings.essay_interval_min || 30);
+    $('settings-interval-row').style.opacity = _userSettings.essay_enabled ? '1' : '0.4';
+  } catch {}
+}
+
+$('settings-essay-enabled').addEventListener('change', () => {
+  $('settings-interval-row').style.opacity = $('settings-essay-enabled').checked ? '1' : '0.4';
+});
+
+$('settings-cancel-btn').addEventListener('click', () => $('settings-modal').classList.add('hidden'));
+$('settings-save-btn').addEventListener('click', async () => {
+  const body = {
+    essay_enabled:      $('settings-essay-enabled').checked,
+    essay_interval_min: parseInt($('settings-essay-interval').value),
+  };
+  await api('PUT', '/api/settings', body);
+  _userSettings = { ..._userSettings, ...body };
+  $('settings-modal').classList.add('hidden');
+});
+
+// Hook settings icon (add to sidebar or nav — look for existing gear/settings button)
+document.querySelectorAll('[data-action="settings"]').forEach(b =>
+  b.addEventListener('click', () => $('settings-modal').classList.remove('hidden'))
+);
+
+// ── Essay trigger ─────────────────────────────────────────────────────────────
+let _lastEssayPos = 0;
+let _essayNotifShown = false;
+
+async function loadLastEssayPos(bookId) {
+  try {
+    const r = await api('GET', `/api/books/${bookId}/essays/last-position`);
+    _lastEssayPos = r.position_sec || 0;
+  } catch {
+    _lastEssayPos = 0;
+  }
+}
+
+function checkEssayTrigger(currentTime) {
+  if (!S.book || !_userSettings.essay_enabled || _essayNotifShown) return;
+  const interval = (_userSettings.essay_interval_min || 30) * 60;
+  if (currentTime - _lastEssayPos >= interval) {
+    _essayNotifShown = true;
+    showEssayNotification();
+  }
+}
+
+function showEssayNotification() {
+  const mins = _userSettings.essay_interval_min || 30;
+  $('essay-notif-text').textContent = `You've covered ${mins} min — write an essay?`;
+  $('essay-notification').classList.remove('hidden');
+}
+
+$('essay-notif-dismiss').addEventListener('click', () => {
+  $('essay-notification').classList.add('hidden');
+  _lastEssayPos = audioEl.currentTime;  // reset trigger from current position
+  _essayNotifShown = false;
+});
+
+$('essay-notif-accept').addEventListener('click', async () => {
+  $('essay-notification').classList.add('hidden');
+  await openEssayPanel();
+});
+
+// ── Essay panel ───────────────────────────────────────────────────────────────
+let _currentEssayId   = null;
+let _essaySubmitting  = false;
+let _essayMinimized   = false;
+
+async function openEssayPanel() {
+  if (!S.book) return;
+  $('essay-panel').classList.remove('hidden');
+  $('essay-tab').classList.add('hidden');
+  $('essay-phase-prompt').classList.remove('hidden');
+  $('essay-phase-review').classList.add('hidden');
+  $('essay-textarea').value = '';
+  $('essay-char-count').textContent = '0 chars';
+  $('essay-prompt-text').textContent = 'Generating prompt…';
+  $('essay-submit-btn').disabled = true;
+  _essayMinimized = false;
+
+  try {
+    const r = await api('POST', '/api/essay/prompt',
+      { book_id: S.book.id, position_sec: audioEl.currentTime });
+    _currentEssayId = r.essay_id;
+    $('essay-prompt-text').textContent = r.prompt;
+    $('essay-submit-btn').disabled = false;
+    _lastEssayPos = audioEl.currentTime;
+    _essayNotifShown = false;
+  } catch (err) {
+    $('essay-prompt-text').textContent = 'Could not generate prompt: ' + err.message;
+  }
+}
+
+$('essay-minimize-btn').addEventListener('click', () => {
+  $('essay-panel').classList.add('hidden');
+  $('essay-tab').classList.remove('hidden');
+  _essayMinimized = true;
+});
+
+$('essay-tab').addEventListener('click', () => {
+  $('essay-panel').classList.remove('hidden');
+  $('essay-tab').classList.add('hidden');
+  _essayMinimized = false;
+});
+
+$('essay-close-btn').addEventListener('click', () => {
+  $('essay-panel').classList.add('hidden');
+  $('essay-tab').classList.add('hidden');
+  _essayNotifShown = false;
+});
+
+$('essay-textarea').addEventListener('input', () => {
+  const len = $('essay-textarea').value.length;
+  $('essay-char-count').textContent = `${len} chars`;
+});
+
+$('essay-submit-btn').addEventListener('click', async () => {
+  if (_essaySubmitting || !_currentEssayId) return;
+  const text = $('essay-textarea').value.trim();
+  if (!text) return;
+  _essaySubmitting = true;
+  $('essay-submit-btn').disabled = true;
+
+  // Switch to review phase
+  $('essay-phase-prompt').classList.add('hidden');
+  $('essay-phase-review').classList.remove('hidden');
+  $('essay-review-essay').textContent = text;
+  $('essay-review-text').textContent = '';
+
+  try {
+    await streamPost('/api/essay/submit/stream',
+      { essay_id: _currentEssayId, book_id: S.book.id, essay_text: text },
+      (ev) => {
+        if (ev.type === 'token') $('essay-review-text').textContent += ev.text;
+      }
+    );
+  } catch (err) {
+    $('essay-review-text').textContent = 'Error: ' + err.message;
+  } finally {
+    _essaySubmitting = false;
+  }
+});
+
+// ── Voice input ───────────────────────────────────────────────────────────────
+let _mediaRecorder = null;
+let _voiceChunks   = [];
+
+$('essay-voice-btn').addEventListener('click', async () => {
+  if (_mediaRecorder && _mediaRecorder.state === 'recording') {
+    _mediaRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _voiceChunks = [];
+    _mediaRecorder = new MediaRecorder(stream);
+    _mediaRecorder.ondataavailable = e => { if (e.data.size > 0) _voiceChunks.push(e.data); };
+    _mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      $('essay-voice-btn').classList.remove('recording');
+      $('essay-voice-label').textContent = 'Processing…';
+      $('essay-voice-btn').disabled = true;
+      try {
+        const blob = new Blob(_voiceChunks, { type: 'audio/webm' });
+        const form = new FormData();
+        form.append('file', blob, 'voice.webm');
+        const r = await fetch('/api/voice-input', { method: 'POST', credentials: 'include', body: form });
+        if (!r.ok) throw new Error(await r.text());
+        const { text } = await r.json();
+        if (text) $('essay-textarea').value += (($('essay-textarea').value ? ' ' : '') + text);
+        $('essay-textarea').dispatchEvent(new Event('input'));
+      } catch (e) {
+        console.error('Voice input error:', e);
+      } finally {
+        $('essay-voice-label').textContent = 'Speak';
+        $('essay-voice-btn').disabled = false;
+      }
+    };
+    _mediaRecorder.start();
+    $('essay-voice-btn').classList.add('recording');
+    $('essay-voice-label').textContent = 'Stop';
+  } catch (e) {
+    alert('Microphone access denied or unavailable.');
+  }
+});
+
+// Hook essay trigger into timeupdate
+const _origTimeUpdate = audioEl.ontimeupdate;
+audioEl.addEventListener('timeupdate', () => {
+  if (!S.seeking) checkEssayTrigger(audioEl.currentTime);
 });
 
 // ── Init ──────────────────────────────────────────────────────────────────────

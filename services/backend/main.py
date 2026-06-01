@@ -146,6 +146,30 @@ def init_db():
     """)
     conn.commit()
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id TEXT PRIMARY KEY,
+            essay_enabled INTEGER DEFAULT 1,
+            essay_interval_min INTEGER DEFAULT 30,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS book_essays (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            position_sec REAL NOT NULL,
+            prompt TEXT NOT NULL,
+            essay_text TEXT,
+            review TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+
     # Migrations for existing databases that predate user columns
     for migration in [
         "ALTER TABLE books ADD COLUMN user_id TEXT",
@@ -838,6 +862,25 @@ async def save_book_settings(book_id: str, body: BookSettings, user: dict = Depe
     return {"status": "saved"}
 
 
+@app.get("/api/books/{book_id}/transcription-progress")
+async def transcription_progress(book_id: str, user: dict = Depends(current_user)):
+    conn = get_db()
+    row = conn.execute("SELECT transcription_status FROM books WHERE id=? AND user_id=?",
+                       (book_id, user["id"])).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404)
+    if row["transcription_status"] != "processing":
+        return {"active": False, "status": row["transcription_status"]}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{TRANSCRIPTION_URL}/progress/{book_id}")
+            r.raise_for_status()
+            return r.json()
+    except Exception:
+        return {"active": True, "pct": 0, "eta_sec": None}
+
+
 @app.post("/api/books/{book_id}/retranscribe")
 async def retranscribe(book_id: str, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
     conn = get_db()
@@ -1235,6 +1278,213 @@ async def clear_chat(book_id: str, user: dict = Depends(current_user)):
     """Clear chat history for a book."""
     _chat_history.pop(f"{user['id']}:{book_id}", None)
     return {"status": "cleared"}
+
+
+# ── User settings ──────────────────────────────────────────────────────────────
+
+class UserSettingsBody(BaseModel):
+    essay_enabled:      Optional[bool] = None
+    essay_interval_min: Optional[int]  = None
+
+
+@app.get("/api/settings")
+async def get_settings(user: dict = Depends(current_user)):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user["id"],)).fetchone()
+    conn.close()
+    if not row:
+        return {"essay_enabled": True, "essay_interval_min": 30}
+    return dict(row)
+
+
+@app.put("/api/settings")
+async def save_settings(body: UserSettingsBody, user: dict = Depends(current_user)):
+    conn = get_db()
+    existing = conn.execute("SELECT user_id FROM user_settings WHERE user_id=?", (user["id"],)).fetchone()
+    if not existing:
+        conn.execute("INSERT INTO user_settings (user_id) VALUES (?)", (user["id"],))
+    fields, values = [], []
+    if body.essay_enabled is not None:
+        fields.append("essay_enabled=?"); values.append(int(body.essay_enabled))
+    if body.essay_interval_min is not None:
+        fields.append("essay_interval_min=?"); values.append(max(5, body.essay_interval_min))
+    if fields:
+        values.append(user["id"])
+        conn.execute(f"UPDATE user_settings SET {', '.join(fields)} WHERE user_id=?", values)
+    conn.commit()
+    conn.close()
+    return {"status": "saved"}
+
+
+# ── Essays ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/books/{book_id}/essays")
+async def list_essays(book_id: str, user: dict = Depends(current_user)):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, position_sec, prompt, essay_text, review, created_at "
+        "FROM book_essays WHERE book_id=? AND user_id=? ORDER BY created_at DESC",
+        (book_id, user["id"])
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/books/{book_id}/essays/last-position")
+async def last_essay_position(book_id: str, user: dict = Depends(current_user)):
+    """Return position_sec of the most recent essay for trigger calculation."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT position_sec FROM book_essays WHERE book_id=? AND user_id=? ORDER BY created_at DESC LIMIT 1",
+        (book_id, user["id"])
+    ).fetchone()
+    conn.close()
+    return {"position_sec": row["position_sec"] if row else 0.0}
+
+
+class EssayPromptRequest(BaseModel):
+    book_id:      str
+    position_sec: float
+
+
+@app.post("/api/essay/prompt")
+async def generate_essay_prompt(req: EssayPromptRequest, user: dict = Depends(current_user)):
+    """Generate an essay prompt based on the passage up to position_sec."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT source_lang, target_lang, title FROM books WHERE id=? AND user_id=?",
+        (req.book_id, user["id"])
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404)
+
+    # Get last ~30 minutes of segments as context
+    path = TRANSCRIPTS_DIR / f"{req.book_id}.json"
+    if not path.exists():
+        raise HTTPException(400, "Transcript not ready")
+    async with aiofiles.open(path) as f:
+        transcript = json.loads(await f.read())
+    segments = _merge_comma_segments(transcript["segments"])
+    window_start = max(0, req.position_sec - 1800)  # last 30 min
+    passage_segs = [s for s in segments if window_start <= s["end"] <= req.position_sec]
+    if not passage_segs:
+        raise HTTPException(400, "No passage found at this position")
+    passage = " ".join(s["text"].strip() for s in passage_segs[-80:])  # last 80 segments
+
+    src = LANG_NAMES.get(row["source_lang"], row["source_lang"])
+    tgt = LANG_NAMES.get(row["target_lang"], row["target_lang"])
+    prompt = (
+        f'Audiobook: "{row["title"]}" ({src})\n\nPassage:\n{passage[:3000]}\n\n'
+        f"Write a short essay task in {tgt} for a language student who just listened to this passage. "
+        f"The task should test comprehension and encourage using vocabulary from the passage. "
+        f"Target length: 300-500 characters. "
+        f"Output ONLY the task text, nothing else."
+    )
+    essay_prompt_text = await _llm_call(prompt, max_tokens=300)
+
+    # Save essay record (no essay yet)
+    essay_id = str(uuid.uuid4())
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO book_essays (id, book_id, user_id, position_sec, prompt) VALUES (?,?,?,?,?)",
+        (essay_id, req.book_id, user["id"], req.position_sec, essay_prompt_text)
+    )
+    conn.commit()
+    conn.close()
+    return {"essay_id": essay_id, "prompt": essay_prompt_text,
+            "source_lang": row["source_lang"], "target_lang": row["target_lang"]}
+
+
+class EssaySubmitRequest(BaseModel):
+    essay_id:   str
+    book_id:    str
+    essay_text: str
+
+
+@app.post("/api/essay/submit/stream")
+async def submit_essay_stream(req: EssaySubmitRequest, user: dict = Depends(current_user)):
+    """Stream essay review. Non-blocking — user can keep listening while review generates."""
+    conn = get_db()
+    essay_row = conn.execute(
+        "SELECT prompt, position_sec FROM book_essays WHERE id=? AND user_id=?",
+        (req.essay_id, user["id"])
+    ).fetchone()
+    book_row = conn.execute(
+        "SELECT source_lang, target_lang, title FROM books WHERE id=? AND user_id=?",
+        (req.book_id, user["id"])
+    ).fetchone()
+    conn.close()
+    if not essay_row or not book_row:
+        raise HTTPException(404)
+
+    src = LANG_NAMES.get(book_row["source_lang"], book_row["source_lang"])
+    tgt = LANG_NAMES.get(book_row["target_lang"], book_row["target_lang"])
+
+    # Detect essay language (heuristic: if it contains Cyrillic → Russian)
+    has_cyrillic = any('Ѐ' <= c <= 'ӿ' for c in req.essay_text)
+    essay_lang = book_row["source_lang"] if has_cyrillic else book_row["target_lang"]
+    essay_lang_name = LANG_NAMES.get(essay_lang, essay_lang)
+
+    review_prompt = (
+        f'Book: "{book_row["title"]}" ({src})\n'
+        f'Essay task: {essay_row["prompt"]}\n\n'
+        f'Student essay ({essay_lang_name}):\n{req.essay_text}\n\n'
+        f"Review this essay in {tgt}:\n"
+        f"1. Did the student understand the passage? (2-3 sentences)\n"
+        f"2. {'Grammar and language quality: note 2-3 specific points.' if essay_lang == book_row['source_lang'] else 'Content quality and how well they engaged with the material.'}\n"
+        f"3. One encouraging suggestion for improvement.\n"
+        f"Be warm and constructive. No markdown."
+    )
+
+    async def generate():
+        full_review = []
+        async for token in _llm_stream([{"role": "user", "content": review_prompt}], max_tokens=600):
+            full_review.append(token)
+            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
+        review_text = "".join(full_review)
+        yield "data: {\"type\":\"done\"}\n\n"
+        # Save essay + review
+        conn = get_db()
+        conn.execute(
+            "UPDATE book_essays SET essay_text=?, review=? WHERE id=?",
+            (req.essay_text, review_text, req.essay_id)
+        )
+        conn.commit()
+        conn.close()
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Voice input ────────────────────────────────────────────────────────────────
+
+@app.post("/api/voice-input")
+async def voice_input(file: UploadFile, user: dict = Depends(current_user)):
+    """Transcribe a recorded audio blob for voice input (essay, chat, etc.)."""
+    voice_id  = f"voice_{uuid.uuid4().hex[:12]}"
+    tmp_audio = BOOKS_DIR / f"{voice_id}.webm"
+    tmp_json  = TRANSCRIPTS_DIR / f"{voice_id}.json"
+    try:
+        async with aiofiles.open(tmp_audio, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                await f.write(chunk)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            resp = await client.post(
+                f"{TRANSCRIPTION_URL}/transcribe",
+                json={"file_path": str(tmp_audio), "book_id": voice_id},
+            )
+            resp.raise_for_status()
+        text = ""
+        if tmp_json.exists():
+            async with aiofiles.open(tmp_json) as tf:
+                td = json.loads(await tf.read())
+                text = " ".join(s["text"].strip() for s in td.get("segments", []))
+        return {"text": text}
+    finally:
+        for p in [tmp_audio, tmp_json]:
+            try: p.unlink()
+            except Exception: pass
 
 
 async def _translate(text: str, source_lang: str, target_lang: str) -> str:

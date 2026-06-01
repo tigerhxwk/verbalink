@@ -455,6 +455,92 @@
   <span id="toast-label"></span>
 </div>
 
+<!-- ── Essay Notification ── -->
+<div id="essay-notification" class="essay-notif hidden">
+  <div class="essay-notif-body">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+    <span id="essay-notif-text">Time to write an essay!</span>
+  </div>
+  <div class="essay-notif-actions">
+    <button class="essay-notif-btn essay-notif-dismiss" id="essay-notif-dismiss">Later</button>
+    <button class="essay-notif-btn essay-notif-accept" id="essay-notif-accept">Write essay</button>
+  </div>
+</div>
+
+<!-- ── Essay Panel (floating, non-blocking) ── -->
+<div id="essay-panel" class="essay-panel hidden">
+  <div class="essay-panel-header">
+    <span class="essay-panel-title">Essay</span>
+    <div class="essay-panel-header-actions">
+      <button class="essay-minimize-btn" id="essay-minimize-btn" title="Minimize">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+      <button class="essay-close-btn" id="essay-close-btn" title="Close">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="essay-panel-body" id="essay-panel-body">
+    <!-- Prompt phase -->
+    <div id="essay-phase-prompt">
+      <p class="essay-prompt-text" id="essay-prompt-text"></p>
+      <div class="essay-input-wrap">
+        <textarea class="essay-textarea" id="essay-textarea" placeholder="Write your essay here…" rows="6"></textarea>
+        <button class="essay-voice-btn" id="essay-voice-btn" title="Voice input">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          <span id="essay-voice-label">Speak</span>
+        </button>
+      </div>
+      <div class="essay-actions">
+        <span class="essay-char-count" id="essay-char-count">0 chars</span>
+        <button class="essay-submit-btn" id="essay-submit-btn">Submit for review</button>
+      </div>
+    </div>
+    <!-- Review phase -->
+    <div id="essay-phase-review" class="hidden">
+      <div class="essay-review-essay" id="essay-review-essay"></div>
+      <div class="essay-review-divider"></div>
+      <p class="essay-review-label">Review</p>
+      <div class="essay-review-text" id="essay-review-text"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Minimized essay tab ── -->
+<div id="essay-tab" class="essay-tab hidden">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+  Essay
+</div>
+
+<!-- ── Settings Modal ── -->
+<div id="settings-modal" class="modal-bg hidden">
+  <div class="modal-card">
+    <div class="modal-title">Settings</div>
+    <div class="modal-row">
+      <label>Essay prompts</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="settings-essay-enabled" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="modal-row" id="settings-interval-row">
+      <label>Prompt every</label>
+      <select id="settings-essay-interval">
+        <option value="10">10 min</option>
+        <option value="20">20 min</option>
+        <option value="30" selected>30 min</option>
+        <option value="45">45 min</option>
+        <option value="60">1 hour</option>
+        <option value="90">1.5 hours</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button id="settings-cancel-btn" class="btn-ghost">Cancel</button>
+      <button id="settings-save-btn" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

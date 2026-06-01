@@ -20,10 +20,6 @@ services:
       - ./data:/data
     networks:
       - verbalink-net
-    depends_on:
-      llama-server:
-        condition: service_healthy
-        required: false
 
   tts:
     build: services/tts

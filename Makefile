@@ -4,10 +4,6 @@
 up:
 	docker compose up -d
 
-# Local: also starts the bundled llama-server (needs GPU)
-up-local:
-	docker compose --profile local-llm up -d
-
 down:
 	docker compose down
 

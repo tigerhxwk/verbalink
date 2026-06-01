@@ -133,9 +133,10 @@ def _do_transcribe(file_path: str, book_id: str) -> dict:
 
     # word_timestamps=True gives an exact start/end for every word, so sentence
     # boundaries land on real word edges instead of being interpolated.
+    # beam_size=1 (greedy) offsets the word-alignment cost — fine for clear narration.
     segments, info = model.transcribe(
         file_path,
-        beam_size=5,
+        beam_size=int(os.environ.get("WHISPER_BEAM_SIZE", "1")),
         vad_filter=True,
         condition_on_previous_text=True,
         word_timestamps=True,
@@ -183,6 +184,9 @@ def _do_transcribe(file_path: str, book_id: str) -> dict:
                 elif wt[-1] == ".":
                     pending = {"word": wt, "end": wend}
 
+        ema_speed = None          # audio-sec processed per real-sec, smoothed
+        last_elapsed = 0.0
+        last_processed = 0.0
         for seg in segments:
             words = list(getattr(seg, "words", None) or [])
             if not words:
@@ -194,8 +198,17 @@ def _do_transcribe(file_path: str, book_id: str) -> dict:
             elapsed = time.monotonic() - started_at
             processed = seg.end
             pct = min(99, round(processed / total * 100))
-            speed = processed / elapsed if elapsed > 0 else 0.5
-            eta = (total - processed) / speed if speed > 0 else None
+
+            # Instantaneous throughput since last segment, EMA-smoothed.
+            # Using recent rate (not the cumulative average from t=0) keeps the ETA
+            # from being dragged down by model warm-up / slow first segments.
+            d_real = elapsed - last_elapsed
+            d_audio = processed - last_processed
+            if d_real > 0.5 and d_audio > 0:
+                inst = d_audio / d_real
+                ema_speed = inst if ema_speed is None else (0.3 * inst + 0.7 * ema_speed)
+                last_elapsed, last_processed = elapsed, processed
+            eta = (total - processed) / ema_speed if ema_speed and ema_speed > 0 else None
             _progress[book_id] = {"processed_sec": processed, "total_sec": total,
                                    "pct": pct, "eta_sec": round(eta) if eta else None}
 

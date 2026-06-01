@@ -1357,6 +1357,16 @@ select:focus { border-color: var(--blue); }
   max-width: 95%;
 }
 .cl-chat-msg.streaming { border-color: var(--amber); }
+.cl-chat-msg p { margin: 0 0 6px; }
+.cl-chat-msg p:last-child { margin-bottom: 0; }
+.cl-chat-msg ul, .cl-chat-msg ol { margin: 4px 0; padding-left: 20px; }
+.cl-chat-msg li { margin: 2px 0; }
+.cl-chat-msg code {
+  background: var(--surface-3); border-radius: 4px;
+  padding: 1px 5px; font-size: 13px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.cl-chat-msg strong { color: var(--text); font-weight: 700; }
 .cl-chat-input-row {
   display: flex;
   gap: 8px;

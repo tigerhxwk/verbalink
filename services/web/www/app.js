@@ -71,6 +71,39 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// Minimal, XSS-safe Markdown → HTML (escape first, then apply inline + block rules).
+// Supports: **bold**, *italic*/_italic_, `code`, bullet lists (- / *), numbered lists, paragraphs.
+function renderMarkdown(src) {
+  const inline = (t) => esc(t)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
+
+  const lines = String(src).split('\n');
+  let html = '', list = null;  // list = 'ul' | 'ol' | null
+  const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    let m;
+    if ((m = line.match(/^[-*]\s+(.*)$/))) {
+      if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
+      html += `<li>${inline(m[1])}</li>`;
+    } else if ((m = line.match(/^\d+\.\s+(.*)$/))) {
+      if (list !== 'ol') { closeList(); html += '<ol>'; list = 'ol'; }
+      html += `<li>${inline(m[1])}</li>`;
+    } else if (line === '') {
+      closeList();
+    } else {
+      closeList();
+      html += `<p>${inline(line)}</p>`;
+    }
+  }
+  closeList();
+  return html;
+}
+
 function b64Blob(b64, mime) {
   const bin = atob(b64), arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
@@ -480,7 +513,8 @@ $('lang-confirm-btn').addEventListener('click', async () => {
   if (!file) return;
 
   const src = $('src-lang-sel').value;
-  const tgt = $('tgt-lang-sel').value;
+  // Target language is chosen per-book in the player; default to last-used (or 'en').
+  const tgt = localStorage.getItem('default_target_lang') || 'en';
   const fd  = new FormData();
   fd.append('file', file);
 
@@ -563,6 +597,17 @@ function saveBookSettings(patch) {
 }
 
 // ── Open book / player ────────────────────────────────────────────────────────
+let _transcriptRefreshTimer = null;
+
+async function refreshPartialTranscript(bookId) {
+  if (!S.book || S.book.id !== bookId) { clearInterval(_transcriptRefreshTimer); return; }
+  try {
+    const data = await api('GET', `/api/books/${bookId}/transcript`);
+    S.transcript = data.segments || S.transcript;
+    if (data.complete) clearInterval(_transcriptRefreshTimer);
+  } catch {}
+}
+
 function _startAudio(bookId, prog, autoplay) {
   audioEl.src = `/api/books/${bookId}/audio`;
   audioEl.load();
@@ -631,6 +676,12 @@ async function openBook(book, collId = null, autoplay = false) {
   try {
     const data = await api('GET', `/api/books/${book.id}/transcript`);
     S.transcript = data.segments || [];
+    // If still transcribing, keep refreshing the partial transcript so the subtitle
+    // (and Clarify reach) extend as more sentences are produced.
+    clearInterval(_transcriptRefreshTimer);
+    if (!data.complete) {
+      _transcriptRefreshTimer = setInterval(() => refreshPartialTranscript(book.id), 20000);
+    }
   } catch {
     S.transcript = [];
   }
@@ -659,6 +710,7 @@ $('pf-tgt-sel').addEventListener('change', async () => {
   try {
     const updated = await api('PATCH', `/api/books/${S.book.id}`, { target_lang: newLang });
     S.book = updated;
+    localStorage.setItem('default_target_lang', newLang);  // remember for next upload
     // Sync in books list
     const idx = S.books.findIndex(b => b.id === updated.id);
     if (idx !== -1) S.books[idx] = updated;
@@ -984,7 +1036,11 @@ async function runClarify() {
     );
 
   } catch (err) {
-    if (err.message !== 'Unauthorized') setClStatus('error: ' + err.message);
+    if (err.message !== 'Unauthorized') {
+      let msg = err.message;
+      try { const p = JSON.parse(msg); if (p.detail) msg = p.detail; } catch {}
+      setClStatus(msg);
+    }
   } finally {
     S.clarifying = false;
     $('clarify-btn').disabled      = false;
@@ -1038,13 +1094,15 @@ async function sendChat() {
 
   appendChatMsg('user', msg);
   const respEl = appendChatMsg('assistant', '', true);
+  let raw = '';
 
   try {
     await streamPost('/api/chat/stream',
       { book_id: S.book.id, message: msg, position_sec: audioEl.currentTime },
       (ev) => {
         if (ev.type === 'token') {
-          respEl.textContent += ev.text;
+          raw += ev.text;
+          respEl.innerHTML = renderMarkdown(raw);  // re-render accumulated markdown
           scrollChatDown();
         } else if (ev.type === 'done') {
           respEl.classList.remove('streaming');

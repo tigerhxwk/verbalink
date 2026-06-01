@@ -563,6 +563,21 @@ select:focus { border-color: var(--blue); }
 .book-card:hover .book-delete { opacity: 1; }
 .book-delete:hover { color: var(--danger); }
 
+.book-retranscribe {
+  position: absolute;
+  top: 8px; right: 40px;
+  background: rgba(8,8,16,0.7);
+  color: var(--text-3);
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity var(--t-fast), color var(--t-fast);
+  backdrop-filter: blur(4px);
+}
+.book-card:hover .book-retranscribe { opacity: 0.7; }
+.book-retranscribe:hover { color: var(--amber); opacity: 1 !important; }
+
 /* ── Library controls ────────────────────────────────────────────────────── */
 .lib-controls {
   display: flex;

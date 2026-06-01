@@ -516,8 +516,12 @@ function makeBookCard(book) {
   const dotCls = { done:'dot-done', pending:'dot-pending', processing:'dot-processing', error:'dot-error' }[book.transcription_status] || 'dot-pending';
   const isProcessing = book.transcription_status === 'processing';
   const statusTxt = isProcessing ? 'transcribing…' : book.transcription_status;
+  const canRetranscribe = book.transcription_status === 'done' || book.transcription_status === 'error';
   card.innerHTML = `
     <button class="book-delete" data-id="${book.id}" title="Delete">✕</button>
+    ${canRetranscribe ? `<button class="book-retranscribe" data-id="${book.id}" title="Re-transcribe (improves sentence timing)">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+    </button>` : ''}
     <div class="book-card-cover"><div class="book-card-cover-inner" style="background:${bookGradient(book.title)}">${bookCoverInner(book.title)}</div></div>
     <div class="book-card-body">
       <div class="book-card-title">${esc(book.title)}</div>
@@ -529,7 +533,8 @@ function makeBookCard(book) {
       ${pct > 0 ? `<div class="book-card-progress"><div style="width:${pct}%"></div></div>` : ''}
     </div>`;
   card.querySelector('.book-delete').addEventListener('click', e => { e.stopPropagation(); deleteBook(book.id); });
-  card.addEventListener('click', e => { if (!e.target.closest('.book-delete')) openBook(book); });
+  card.querySelector('.book-retranscribe')?.addEventListener('click', e => { e.stopPropagation(); retranscribeBook(book.id); });
+  card.addEventListener('click', e => { if (!e.target.closest('.book-delete') && !e.target.closest('.book-retranscribe')) openBook(book); });
   return card;
 }
 
@@ -548,6 +553,16 @@ async function deleteBook(id) {
   if (!confirm('Delete this book and its transcript?')) return;
   await api('DELETE', `/api/books/${id}`);
   await loadAll();
+}
+
+async function retranscribeBook(id) {
+  if (!confirm('Re-transcribe this book? This regenerates the transcript with precise sentence timing. The current transcript will be replaced.')) return;
+  try {
+    await api('POST', `/api/books/${id}/retranscribe`);
+    await loadAll();  // status flips to pending/processing; progress bar takes over
+  } catch (err) {
+    alert('Re-transcribe failed: ' + err.message);
+  }
 }
 
 // ── Book settings persistence ─────────────────────────────────────────────────
@@ -965,11 +980,10 @@ async function runClarify() {
           setClStatus('');
           expl.classList.remove('hidden');
           _audioOrigB64 = ev.audio_original || null;
+          _audioTrlB64  = ev.audio_translated || null;
           $('cl-tts-orig').disabled = !_audioOrigB64;
+          $('cl-tts-trl').disabled  = !_audioTrlB64;
           startAutoResume(ev.sentence_start);
-        } else if (ev.type === 'tts_translated') {
-          _audioTrlB64 = ev.audio || null;
-          $('cl-tts-trl').disabled = !_audioTrlB64;
         } else if (ev.type === 'token') {
           expl.textContent += ev.text;
         }

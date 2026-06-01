@@ -493,7 +493,7 @@ async def run_transcription(book_id: str, file_path: str):
                     logger.info(f"Auto-detected language for {book_id}: {detected}")
         except Exception as e:
             logger.warning(f"Language backfill failed ({book_id}): {e}")
-        await run_translation(book_id)
+        # No batch translation — Clarify translates each sentence live on demand.
     except Exception as e:
         conn = get_db()
         conn.execute("UPDATE books SET transcription_status='error', error=? WHERE id=?", (str(e), book_id))
@@ -583,22 +583,77 @@ async def _llm_stream(messages: list, max_tokens: int = 1200, no_think: bool = F
     logger.info("_llm_stream: %d tokens, raw[:200]=%r", token_count, "".join(raw_accum)[:200])
 
 
-def _merge_comma_segments(segments: list) -> list:
-    """Merge whisper segments that end with commas/semicolons into complete sentences."""
+_SENTENCE_TERMINATORS = ".!?…"
+
+
+def _split_keeping_terminators(text: str) -> list[str]:
+    """Split text into sentence pieces, keeping terminal punctuation with each piece.
+    Consecutive terminators ('...', '?!') and trailing quotes/brackets stay attached."""
+    out, buf, i, n = [], "", 0, len(text)
+    while i < n:
+        ch = text[i]
+        buf += ch
+        if ch in _SENTENCE_TERMINATORS:
+            j = i + 1
+            while j < n and text[j] in _SENTENCE_TERMINATORS:  # "...", "?!"
+                buf += text[j]; j += 1
+            while j < n and text[j] in '"\'»”)]':              # closing quotes/brackets
+                buf += text[j]; j += 1
+            out.append(buf)
+            buf = ""
+            i = j
+            while i < n and text[i] == ' ':                    # skip the space between sentences
+                i += 1
+        else:
+            i += 1
+    if buf.strip():
+        out.append(buf)
+    return out
+
+
+def _segment_sentences(segments: list) -> list:
+    """Re-segment raw whisper output into complete sentences.
+
+    - Fragments (ending in comma/semicolon or no terminal punctuation) merge forward.
+    - Segments containing multiple sentences are split on . ! ? …
+    - Timestamps for mid-segment splits are interpolated by character position.
+    Idempotent: running it on already-sentence-level data returns the same sentences.
+    """
     if not segments:
         return segments
-    merged = []
-    cur = dict(segments[0])
-    for seg in segments[1:]:
-        txt = cur["text"].strip()
-        if txt and txt[-1] in (",", ";") or (len(txt) < 3):
-            cur["text"] = txt + " " + seg["text"].strip()
-            cur["end"] = seg["end"]
-        else:
-            merged.append(cur)
-            cur = dict(seg)
-    merged.append(cur)
-    return merged
+    sentences = []
+    cur_text = ""
+    cur_start = None
+
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        seg_start, seg_end = seg["start"], seg["end"]
+        L = len(text)
+        if cur_start is None:
+            cur_start = seg_start
+
+        pos = 0
+        for piece in _split_keeping_terminators(text):
+            piece_str = piece.strip()
+            pos += len(piece)
+            piece_end = seg_start + (seg_end - seg_start) * (pos / L) if L else seg_end
+            cur_text = (cur_text + " " + piece_str).strip() if cur_text else piece_str
+            if piece_str and piece_str[-1] in _SENTENCE_TERMINATORS:
+                sentences.append({"start": round(cur_start, 3), "end": round(piece_end, 3), "text": cur_text})
+                cur_text = ""
+                cur_start = piece_end
+        if not cur_text:
+            cur_start = None  # next segment starts a fresh sentence
+
+    if cur_text.strip():
+        sentences.append({"start": round(cur_start or 0, 3),
+                          "end": round(segments[-1]["end"], 3), "text": cur_text.strip()})
+
+    for i, s in enumerate(sentences):
+        s["id"] = i
+    return sentences
 
 
 async def _analyze_sentence(text: str, source_lang: str, target_lang: str, mode: str = "advanced") -> dict:
@@ -649,78 +704,6 @@ async def _urban_dict(term: str) -> Optional[str]:
     except Exception:
         pass
     return None
-
-
-# ── Translation background task ───────────────────────────────────────────────
-
-async def run_translation(book_id: str):
-    conn = get_db()
-    row = conn.execute(
-        "SELECT source_lang, target_lang, title FROM books WHERE id=?", (book_id,)
-    ).fetchone()
-    conn.close()
-    if not row:
-        return
-
-    path = TRANSCRIPTS_DIR / f"{book_id}.json"
-    if not path.exists():
-        return
-
-    conn = get_db()
-    conn.execute("UPDATE books SET translation_status='processing' WHERE id=?", (book_id,))
-    conn.commit()
-    conn.close()
-
-    try:
-        async with aiofiles.open(path) as f:
-            data = json.loads(await f.read())
-
-        segments = data.get("segments", [])
-        if not segments:
-            conn = get_db()
-            conn.execute("UPDATE books SET translation_status='done' WHERE id=?", (book_id,))
-            conn.commit()
-            conn.close()
-            return
-
-        src_name = LANG_NAMES.get(row["source_lang"], row["source_lang"])
-        tgt_name = LANG_NAMES.get(row["target_lang"], row["target_lang"])
-        title = row["title"]
-        BATCH = 40
-
-        for i in range(0, len(segments), BATCH):
-            batch = segments[i: i + BATCH]
-            texts = [s["text"].strip() for s in batch]
-            prompt = (
-                f"Translate these {len(texts)} {src_name} sentences to {tgt_name}.\n"
-                f'Book: "{title}"\n'
-                f"Return ONLY a JSON array of {len(texts)} translated strings in the same order. "
-                f"No markdown, no explanation.\n\n"
-                + json.dumps(texts, ensure_ascii=False)
-            )
-            raw = await _llm_call(prompt, max_tokens=3000, no_think=True)
-            m = re.search(r"\[.*\]", raw, re.DOTALL)
-            if not m:
-                raise ValueError(f"No JSON array in LLM response (batch {i}): {raw[:200]}")
-            translations = json.loads(m.group())
-            for j, seg in enumerate(batch):
-                seg["translated_text"] = translations[j] if j < len(translations) else ""
-
-        async with aiofiles.open(path, "w") as f:
-            await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-
-        conn = get_db()
-        conn.execute("UPDATE books SET translation_status='done' WHERE id=?", (book_id,))
-        conn.commit()
-        conn.close()
-        logger.info(f"Translation complete: {book_id}")
-
-    except Exception as e:
-        logger.error(f"Translation failed ({book_id}): {e}")
-        conn = get_db()
-        conn.execute("UPDATE books SET translation_status='error' WHERE id=?", (book_id,))
-        conn.commit()
-        conn.close()
 
 
 # ── Language detection ────────────────────────────────────────────────────────
@@ -928,21 +911,6 @@ async def retranscribe(book_id: str, background_tasks: BackgroundTasks, user: di
     return {"status": "queued"}
 
 
-@app.post("/api/books/{book_id}/translate")
-async def trigger_translation(book_id: str, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
-    conn = get_db()
-    row = conn.execute(
-        "SELECT transcription_status FROM books WHERE id=? AND user_id=?", (book_id, user["id"])
-    ).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(404)
-    if row["transcription_status"] != "done":
-        raise HTTPException(400, "Transcription not complete")
-    background_tasks.add_task(run_translation, book_id)
-    return {"status": "queued"}
-
-
 @app.delete("/api/books/{book_id}")
 async def delete_book(book_id: str, user: dict = Depends(current_user)):
     conn = get_db()
@@ -1102,7 +1070,7 @@ async def _load_segment(book_id: str, user_id: str, position_sec: float):
     path = TRANSCRIPTS_DIR / f"{book_id}.json"
     async with aiofiles.open(path) as f:
         transcript = json.loads(await f.read())
-    segments = _merge_comma_segments(transcript["segments"])
+    segments = transcript["segments"]  # already sentence-level from transcription service
     # Prefer the segment currently playing (contains position_sec)
     current = next((s for s in segments if s["start"] <= position_sec <= s["end"]), None)
     if current:
@@ -1174,104 +1142,97 @@ class ClarifyStreamRequest(BaseModel):
     mode: str = "advanced"
 
 
+async def _synthesize_tts(text: str, lang: str) -> Optional[str]:
+    """Return base64 WAV for text in lang, or None on failure (logs reason)."""
+    if not text:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(f"{TTS_URL}/synthesize", json={"text": text, "lang": lang})
+            r.raise_for_status()
+            return base64.b64encode(r.content).decode()
+    except Exception as e:
+        logger.warning("TTS failed (lang=%s): %s", lang, e)
+        return None
+
+
 @app.post("/api/clarify/stream")
 async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current_user)):
-    """Stream the full clarify response as SSE: first a 'meta' event with JSON data,
-    then 'token' events for the explanation, then 'done'."""
+    """SSE clarify: 'meta' event (translation+terms+TTS) first, then explanation 'token' events.
+
+    Two LLM calls: (1) fast structured translation+terms, (2) streamed prose explanation.
+    Keeping them separate makes the explanation stream reliably and lets beginner/advanced differ.
+    """
     segment, source_lang, target_lang = await _load_segment(req.book_id, user["id"], req.position_sec)
     original = segment["text"].strip()
     src = LANG_NAMES.get(source_lang, source_lang)
     tgt = LANG_NAMES.get(target_lang, target_lang)
 
-    # TTS for original (fast, parallel with LLM stream start)
-    audio_original = None
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{TTS_URL}/synthesize", json={"text": original, "lang": source_lang})
-            r.raise_for_status()
-            audio_original = base64.b64encode(r.content).decode()
-    except Exception as e:
-        logger.warning("TTS original failed (lang=%s): %s", source_lang, e)
-    # audio_translated generated after we have the translation (inside stream)
-
-    # Single streaming call: JSON header then explanation tokens
-    if req.mode == "beginner":
-        expl_instr = (
-            f"Then on the next lines explain this sentence in {tgt} for a complete language beginner "
-            f"(3-5 sentences): break down key words, grammar structure, meaning and cultural context. "
-            f"Write naturally, no headers, no markdown."
-        )
-    else:
-        expl_instr = (
-            f"Then on the next lines write a concise explanation in {tgt} (2-3 sentences): "
-            f"meaning, nuance, cultural context if relevant. No markdown."
-        )
-
-    stream_prompt = (
-        f'Sentence in {src}: "{original}"\n\n'
-        f"Output ONLY this exact format — no extra text:\n"
-        f'{{"translation":"<{tgt} translation>","terms":[{{"term":"<term>","meaning":"<{tgt} meaning>","is_slang":false}}]}}\n'
-        f"---\n"
-        f"{expl_instr}\n\n"
-        f"Terms: only idioms, slang, or culturally-specific expressions. Empty array if none."
+    # 1. Structured translation + terms (reliable JSON, no_think)
+    tr_prompt = (
+        f'Translate this {src} sentence to {tgt} and identify any idioms/slang.\n'
+        f'Sentence: "{original}"\n\n'
+        f"Return ONLY valid JSON, no other text:\n"
+        f'{{"translation":"<full {tgt} translation>","terms":[{{"term":"<original term>","meaning":"<{tgt} meaning>","is_slang":false}}]}}\n'
+        f"Include in terms ONLY idioms, slang, phraseological units, or culturally-specific expressions. "
+        f"Empty array if none."
     )
+    tr_raw = await _llm_call(tr_prompt, max_tokens=800, no_think=True)
+    try:
+        m = re.search(r'\{.*\}', tr_raw, re.DOTALL)
+        parsed = json.loads(m.group()) if m else {}
+    except Exception:
+        parsed = {}
+    translation = parsed.get("translation") or await _translate(original, source_lang, target_lang)
+    terms = parsed.get("terms", []) if isinstance(parsed.get("terms"), list) else []
 
-    base_meta = {
-        "original_text":  original,
-        "source_lang":    source_lang,
-        "target_lang":    target_lang,
-        "sentence_start": segment["start"],
-        "sentence_end":   segment["end"],
-        "audio_original": audio_original,
+    # UrbanDictionary enrichment for slang
+    if terms:
+        ud_tasks = [_urban_dict(t["term"]) if t.get("is_slang") else asyncio.sleep(0, result=None) for t in terms]
+        for t, ud in zip(terms, await asyncio.gather(*ud_tasks, return_exceptions=True)):
+            if isinstance(ud, str) and ud:
+                t["urban"] = ud
+
+    # TTS for both original and translation
+    audio_original   = await _synthesize_tts(original, source_lang)
+    audio_translated = await _synthesize_tts(translation, target_lang)
+
+    meta_event = {
+        "original_text":    original,
+        "translated_text":  translation,
+        "terms":            terms,
+        "source_lang":      source_lang,
+        "target_lang":      target_lang,
+        "sentence_start":   segment["start"],
+        "sentence_end":     segment["end"],
+        "audio_original":   audio_original,
+        "audio_translated": audio_translated,
     }
 
+    # 2. Explanation prompt — beginner vs advanced genuinely differ
+    if req.mode == "beginner":
+        expl_prompt = (
+            f'{src} sentence: "{original}"\n'
+            f'{tgt} translation: "{translation}"\n\n'
+            f"You are teaching a complete beginner in {src}. Explain in {tgt}, covering:\n"
+            f"1. Word-by-word: identify each key word's part of speech (noun, verb, adjective, article, preposition) and its meaning.\n"
+            f"2. Grammar: explain tense, case, word order, and any constructions used.\n"
+            f"3. The overall meaning in plain language.\n"
+            f"Write clearly for a learner. Plain text, no markdown headers."
+        )
+    else:
+        expl_prompt = (
+            f'{src} sentence: "{original}"\n'
+            f'{tgt} translation: "{translation}"\n\n'
+            f"In {tgt}, write a concise explanation (2-3 sentences): meaning, nuance, "
+            f"and cultural context if relevant. Plain text, no markdown."
+        )
+
     async def generate():
-        header_buf = ""
-        header_done = False
-        async for token in _llm_stream([{"role": "user", "content": stream_prompt}], max_tokens=1000, no_think=True):
-            if not header_done:
-                header_buf += token
-                if "---" in header_buf:
-                    header_done = True
-                    parts = header_buf.split("---", 1)
-                    # Parse JSON header
-                    try:
-                        m = re.search(r'\{.*\}', parts[0], re.DOTALL)
-                        parsed = json.loads(m.group()) if m else {}
-                    except Exception:
-                        parsed = {}
-                    translation = parsed.get("translation", "")
-                    meta_event = {**base_meta,
-                                  "translated_text": translation,
-                                  "terms": parsed.get("terms", [])}
-                    yield f"data: {json.dumps({'type': 'meta', **meta_event})}\n\n"
-                    # TTS for translation — send as separate event
-                    try:
-                        async with httpx.AsyncClient(timeout=60) as _c:
-                            _r = await _c.post(f"{TTS_URL}/synthesize",
-                                               json={"text": translation, "lang": target_lang})
-                            _r.raise_for_status()
-                            audio_trl = base64.b64encode(_r.content).decode()
-                        yield f"data: {json.dumps({'type': 'tts_translated', 'audio': audio_trl})}\n\n"
-                    except Exception as e:
-                        logger.warning("TTS translated failed (lang=%s): %s", target_lang, e)
-                    # Emit any explanation tokens that came after ---
-                    after = parts[1].lstrip("\n")
-                    if after:
-                        yield f"data: {json.dumps({'type': 'token', 'text': after})}\n\n"
-            else:
-                yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
-        if not header_done:
-            # Model didn't output separator — emit what we have as translation fallback
-            try:
-                m = re.search(r'\{.*\}', header_buf, re.DOTALL)
-                parsed = json.loads(m.group()) if m else {}
-            except Exception:
-                parsed = {}
-            meta_event = {**base_meta,
-                          "translated_text": parsed.get("translation", header_buf.strip()),
-                          "terms": parsed.get("terms", [])}
-            yield f"data: {json.dumps({'type': 'meta', **meta_event})}\n\n"
+        yield f"data: {json.dumps({'type': 'meta', **meta_event})}\n\n"
+        async for token in _llm_stream([{"role": "user", "content": expl_prompt}],
+                                       max_tokens=900, no_think=True):
+            yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
         yield "data: {\"type\":\"done\"}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream",
@@ -1305,7 +1266,7 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
         path = TRANSCRIPTS_DIR / f"{req.book_id}.json"
         async with aiofiles.open(path) as f:
             transcript = json.loads(await f.read())
-        segments = _merge_comma_segments(transcript["segments"])
+        segments = transcript["segments"]  # already sentence-level from transcription service
         done = [s for s in segments if s["end"] <= req.position_sec]
         if done:
             # Include last 3 sentences as context
@@ -1324,7 +1285,7 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
 
     async def generate():
         full_response = []
-        async for token in _llm_stream(messages, max_tokens=600):
+        async for token in _llm_stream(messages, max_tokens=600, no_think=True):
             full_response.append(token)
             yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
         yield "data: {\"type\":\"done\"}\n\n"
@@ -1431,7 +1392,7 @@ async def generate_essay_prompt(req: EssayPromptRequest, user: dict = Depends(cu
         raise HTTPException(400, "Transcript not ready")
     async with aiofiles.open(path) as f:
         transcript = json.loads(await f.read())
-    segments = _merge_comma_segments(transcript["segments"])
+    segments = transcript["segments"]  # already sentence-level from transcription service
     window_start = max(0, req.position_sec - 1800)  # last 30 min
     passage_segs = [s for s in segments if window_start <= s["end"] <= req.position_sec]
     if not passage_segs:
@@ -1505,7 +1466,7 @@ async def submit_essay_stream(req: EssaySubmitRequest, user: dict = Depends(curr
 
     async def generate():
         full_review = []
-        async for token in _llm_stream([{"role": "user", "content": review_prompt}], max_tokens=600):
+        async for token in _llm_stream([{"role": "user", "content": review_prompt}], max_tokens=600, no_think=True):
             full_review.append(token)
             yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
         review_text = "".join(full_review)

@@ -1,4 +1,5 @@
 import io
+import logging
 import wave
 from pathlib import Path
 
@@ -6,6 +7,9 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s tts: %(message)s")
+logger = logging.getLogger("tts")
 
 MODELS_DIR = Path("/models")
 
@@ -57,18 +61,35 @@ class SynthRequest(BaseModel):
     lang: str
 
 
+def _synthesize_to_wav(voice, text: str, wav) -> None:
+    """Synthesize across piper-tts API versions (1.x changed the signature)."""
+    # piper-tts >= 1.0: synthesize_wav(text, wav, syn_config=SynthesisConfig(...))
+    if hasattr(voice, "synthesize_wav"):
+        try:
+            from piper import SynthesisConfig
+            voice.synthesize_wav(text, wav, syn_config=SynthesisConfig(length_scale=1.15))
+            return
+        except (ImportError, TypeError):
+            voice.synthesize_wav(text, wav)
+            return
+    # piper-tts < 1.0: synthesize(text, wav, length_scale=..., sentence_silence=...)
+    voice.synthesize(text, wav, length_scale=1.15, sentence_silence=0.3)
+
+
 @app.post("/synthesize")
 async def synthesize(req: SynthRequest):
     voice = voices.get(req.lang)
     if not voice:
         raise HTTPException(400, f"Unsupported language: {req.lang}")
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wav:
-        # length_scale > 1.0 = slightly slower, better for learning
-        voice.synthesize(req.text, wav, length_scale=1.15, sentence_silence=0.3)
-    buf.seek(0)
-    return Response(content=buf.read(), media_type="audio/wav")
+    try:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wav:
+            _synthesize_to_wav(voice, req.text, wav)
+        buf.seek(0)
+        return Response(content=buf.read(), media_type="audio/wav")
+    except Exception as e:
+        logger.exception("Synthesis failed (lang=%s)", req.lang)
+        raise HTTPException(500, f"Synthesis failed: {e}")
 
 
 @app.get("/health")

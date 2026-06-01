@@ -954,6 +954,33 @@ async def get_transcript(book_id: str, user: dict = Depends(current_user)):
     return {"segments": segments, "complete": complete}
 
 
+_CHAPTER_RE = re.compile(
+    r'^\s*("?)(chapter|part|prologue|epilogue|глава|часть|пролог|эпилог)\b',
+    re.IGNORECASE,
+)
+
+
+@app.get("/api/books/{book_id}/chapters")
+async def get_chapters(book_id: str, user: dict = Depends(current_user)):
+    """Detect chapter markers by scanning transcript sentences for heading patterns."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM books WHERE id=? AND user_id=?", (book_id, user["id"])).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404)
+    segments, _ = _read_transcript(book_id)
+    chapters = []
+    last_t = -60.0
+    for s in segments:
+        text = s["text"].strip()
+        if _CHAPTER_RE.match(text) and s["start"] - last_t > 30:  # de-dupe near-duplicates
+            # Label = up to the first sentence terminator, capped
+            label = re.split(r'[.!?…]', text, 1)[0].strip()[:48]
+            chapters.append({"time": round(s["start"], 2), "label": label})
+            last_t = s["start"]
+    return {"chapters": chapters}
+
+
 @app.get("/api/books/{book_id}/sentences")
 async def get_sentences(book_id: str, around: float = 0.0, before: int = 60, after: int = 60,
                         user: dict = Depends(current_user)):

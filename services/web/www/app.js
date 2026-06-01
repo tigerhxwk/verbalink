@@ -615,6 +615,7 @@ async function ensureWindow(t, force = false) {
     WIN.lo = data.window_start_sec; WIN.hi = data.window_end_sec;
     WIN.hasPrev = data.has_prev; WIN.hasNext = data.has_next; WIN.bookId = S.book.id;
     S.activeIdx = -1;
+    renderTranscriptScroller();
     updateActive(audioEl.currentTime);
   } catch {
     // transcript not ready yet — leave window empty, will retry on next tick
@@ -631,6 +632,36 @@ function _startAudio(bookId, prog, autoplay) {
     if (autoplay) audioEl.play().catch(() => {});
   }, { once: true });
 }
+
+// ── Chapter markers on the seek bar ───────────────────────────────────────────
+async function loadChapters(bookId) {
+  S.chapters = [];
+  $('seek-markers').innerHTML = '';
+  try {
+    const data = await api('GET', `/api/books/${bookId}/chapters`);
+    S.chapters = data.chapters || [];
+    renderChapterMarkers();
+  } catch {}
+}
+
+function renderChapterMarkers() {
+  const cont = $('seek-markers');
+  const dur = audioEl.duration;
+  cont.innerHTML = '';
+  if (!dur || !isFinite(dur) || !(S.chapters || []).length) return;
+  S.chapters.forEach(ch => {
+    if (ch.time > dur) return;
+    const m = document.createElement('div');
+    m.className = 'pf-seek-marker';
+    m.style.left = (ch.time / dur * 100) + '%';
+    m.title = ch.label;
+    m.addEventListener('click', () => { clearAutoResume(); audioEl.currentTime = ch.time; });
+    cont.appendChild(m);
+  });
+}
+
+audioEl.addEventListener('loadedmetadata', renderChapterMarkers);
+audioEl.addEventListener('durationchange', renderChapterMarkers);
 
 async function openBook(book, collId = null, autoplay = false) {
   S.book = book;
@@ -688,6 +719,7 @@ async function openBook(book, collId = null, autoplay = false) {
 
   // Load the initial transcript window around the saved position
   ensureWindow(savedPos(book.id) || 0, true);
+  loadChapters(book.id);
 
   // Load playlist when opened from a collection
   if (collId) {
@@ -697,13 +729,11 @@ async function openBook(book, collId = null, autoplay = false) {
     } catch {
       S.playlistBooks = [];
     }
-    if (S.playlistBooks.length > 1) {
-      renderPlaylist();
-      showRightPanel('playlist');
-    }
+    if (S.playlistBooks.length > 1) renderPlaylist();
   } else {
     S.playlistBooks = [];
   }
+  showRightPanel('transcript');  // reading view is the default
 }
 
 // ── Language selector in player ───────────────────────────────────────────────
@@ -858,19 +888,90 @@ function updateActive(t) {
   if (idx >= 0 && segs[idx]) {
     $('mini-sub').textContent = segs[idx].text;
   }
+  highlightTranscript(idx);
+}
+
+// ── Transcript scroller ─────────────────────────────────────────────────────
+let _transcriptCollapsed = localStorage.getItem('transcript_collapsed') === '1';
+
+function renderTranscriptScroller() {
+  const scroll = $('transcript-scroll');
+  if (!scroll) return;
+  const segs = S.transcript || [];
+  scroll.innerHTML = '';
+  segs.forEach((seg, i) => {
+    const row = document.createElement('div');
+    row.className = 'tr-line' + (i === S.activeIdx ? ' active' : '');
+    row.dataset.i = i;
+
+    const txt = document.createElement('button');
+    txt.className = 'tr-line-text';
+    txt.textContent = seg.text.trim();
+    txt.title = 'Explain this sentence';
+    txt.addEventListener('click', () => { if (!S.clarifying) analyzeSentenceFor(seg); });
+
+    const rew = document.createElement('button');
+    rew.className = 'tr-line-rewind';
+    rew.title = 'Rewind to the start of this sentence';
+    rew.innerHTML = _REWIND_SVG;
+    rew.addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearAutoResume(); stopTts();
+      audioEl.currentTime = seg.start;
+      audioEl.play().catch(() => {});
+    });
+
+    row.appendChild(txt);
+    row.appendChild(rew);
+    scroll.appendChild(row);
+  });
+  highlightTranscript(S.activeIdx);
+}
+
+function highlightTranscript(idx) {
+  const scroll = $('transcript-scroll');
+  if (!scroll || _transcriptCollapsed) return;
+  const prev = scroll.querySelector('.tr-line.active');
+  if (prev) prev.classList.remove('active');
+  const row = scroll.querySelector(`.tr-line[data-i="${idx}"]`);
+  if (row) {
+    row.classList.add('active');
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+function applyTranscriptCollapsed() {
+  $('pf-transcript-view').classList.toggle('collapsed', _transcriptCollapsed);
+}
+
+$('transcript-toggle-btn').addEventListener('click', () => {
+  _transcriptCollapsed = !_transcriptCollapsed;
+  localStorage.setItem('transcript_collapsed', _transcriptCollapsed ? '1' : '0');
+  applyTranscriptCollapsed();
+  if (!_transcriptCollapsed) highlightTranscript(S.activeIdx);
+});
+
+// Clarify a specific sentence object (used by the scroller rows)
+function analyzeSentenceFor(seg) {
+  audioEl.pause();
+  openClPanel();
+  $('cl-original').textContent = '';
+  $('cl-translated').textContent = '';
+  $('cl-explanation').textContent = '';
+  $('cl-explanation').classList.add('hidden');
+  $('cl-terms').classList.add('hidden');
+  buildSentencePicker();
+  analyzeSentence((seg.start + seg.end) / 2);
 }
 
 // ── Right panel helpers ───────────────────────────────────────────────────────
 function showRightPanel(view) {
   $('pf-right-panel').classList.remove('hidden');
   pfFull.classList.add('pf-panel-open');
-  if (view === 'clarify') {
-    $('pf-playlist-view').classList.add('hidden');
-    $('pf-clarify-panel').classList.remove('hidden');
-  } else {
-    $('pf-clarify-panel').classList.add('hidden');
-    $('pf-playlist-view').classList.remove('hidden');
-  }
+  $('pf-transcript-view').classList.toggle('hidden', view !== 'transcript');
+  $('pf-playlist-view').classList.toggle('hidden', view !== 'playlist');
+  $('pf-clarify-panel').classList.toggle('hidden', view !== 'clarify');
+  if (view === 'transcript') applyTranscriptCollapsed();
 }
 
 function hideRightPanel() {
@@ -883,11 +984,7 @@ function openClPanel() { showRightPanel('clarify'); }
 
 function closeClPanel() {
   stopTts();
-  if (S.playlistBooks.length > 1) {
-    showRightPanel('playlist');
-  } else {
-    hideRightPanel();
-  }
+  showRightPanel('transcript');  // return to the reading view
 }
 
 function renderClTerms(terms) {
@@ -1025,6 +1122,8 @@ function recentSentences(maxCount = 5) {
   return { list: segs.slice(start, idx + 1), currentIdx: idx };
 }
 
+const _REWIND_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 19 2 12 11 5 11 19"/><polyline points="22 19 13 12 22 5 22 19"/></svg>';
+
 function buildSentencePicker() {
   const picker = $('cl-picker');
   const wrap = $('cl-picker-wrap');
@@ -1033,15 +1132,34 @@ function buildSentencePicker() {
   wrap.classList.remove('hidden');
   picker.innerHTML = '';
   list.forEach((seg, i) => {
-    const row = document.createElement('button');
+    const row = document.createElement('div');
     row.className = 'cl-picker-item' + (i === list.length - 1 ? ' current' : '');
-    row.textContent = seg.text.trim();
-    row.addEventListener('click', () => {
+
+    const txt = document.createElement('button');
+    txt.className = 'cl-picker-text';
+    txt.textContent = seg.text.trim();
+    txt.title = 'Explain this sentence';
+    txt.addEventListener('click', () => {
       if (S.clarifying) return;
       picker.querySelectorAll('.cl-picker-item').forEach(el => el.classList.remove('selected'));
       row.classList.add('selected');
       analyzeSentence((seg.start + seg.end) / 2);
     });
+
+    const rew = document.createElement('button');
+    rew.className = 'cl-picker-rewind';
+    rew.title = 'Rewind to the start of this sentence';
+    rew.innerHTML = _REWIND_SVG;
+    rew.addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearAutoResume();
+      stopTts();
+      audioEl.currentTime = seg.start;
+      audioEl.play().catch(() => {});
+    });
+
+    row.appendChild(txt);
+    row.appendChild(rew);
     picker.appendChild(row);
   });
   return list;

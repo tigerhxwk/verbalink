@@ -255,6 +255,7 @@
       </div>
 
       <div class="pf-seek-wrap">
+        <div class="pf-seek-markers" id="seek-markers"></div>
         <input type="range" class="pf-seek" id="seek-bar" min="0" step="0.1" value="0">
         <div class="pf-times">
           <span id="time-cur">0:00</span>
@@ -310,8 +311,19 @@
       </div>
     </div>
 
-    <!-- Right panel: playlist + clarify -->
+    <!-- Right panel: transcript + playlist + clarify -->
     <div class="pf-right-panel hidden" id="pf-right-panel">
+
+      <!-- Live transcript scroller -->
+      <div class="pf-transcript-view" id="pf-transcript-view">
+        <div class="pf-transcript-head">
+          <span class="pf-transcript-label">Transcript</span>
+          <button class="pf-transcript-toggle" id="transcript-toggle-btn" title="Collapse / expand">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+        <div class="pf-transcript-scroll" id="transcript-scroll"></div>
+      </div>
 
       <!-- Playlist view -->
       <div class="pf-playlist-view" id="pf-playlist-view">

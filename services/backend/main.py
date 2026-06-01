@@ -25,6 +25,7 @@ from ldap3 import Connection as LdapConn, NONE as LDAP_NONE, Server as LdapServe
 from passlib.context import CryptContext
 from pydantic import BaseModel, field_validator
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 logger = logging.getLogger("reader")
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -525,8 +526,15 @@ async def _llm_call(prompt: str, max_tokens: int = 2000, no_think: bool = False)
 
 
 async def _llm_stream(messages: list, max_tokens: int = 1200, no_think: bool = False):
-    """Async generator yielding clean text tokens (thinking stripped) from streaming LLM."""
+    """Async generator yielding clean text tokens (thinking stripped) from streaming LLM.
+
+    Handles three cases robustly:
+      - no thinking block at all (no_think=True or model just answers) → stream everything
+      - <think>...</think> block present → skip it, stream what follows
+    """
     extra = {"chat_template_kwargs": {"enable_thinking": False}} if no_think else {}
+    token_count = 0
+    raw_accum = []
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
         async with client.stream(
             "POST", f"{LLM_BASE_URL}/chat/completions",
@@ -536,25 +544,43 @@ async def _llm_stream(messages: list, max_tokens: int = 1200, no_think: bool = F
         ) as resp:
             resp.raise_for_status()
             buf = ""
-            thinking_done = False
+            phase = "detect"   # detect → (skip_think | passthrough)
             async for line in resp.aiter_lines():
                 if not line.startswith("data: ") or line == "data: [DONE]":
                     continue
                 try:
                     token = json.loads(line[6:])["choices"][0]["delta"].get("content") or ""
-                    if not token:
-                        continue
-                    if not thinking_done:
-                        buf += token
-                        if "</think>" in buf:
-                            thinking_done = True
-                            after = buf.split("</think>", 1)[1].lstrip("\n")
-                            if after:
-                                yield after
-                    else:
-                        yield token
                 except Exception:
-                    pass
+                    continue
+                if not token:
+                    continue
+                token_count += 1
+                raw_accum.append(token)
+
+                if phase == "passthrough":
+                    yield token
+                    continue
+                if phase == "skip_think":
+                    buf += token
+                    if "</think>" in buf:
+                        after = buf.split("</think>", 1)[1].lstrip("\n")
+                        phase = "passthrough"
+                        if after:
+                            yield after
+                    continue
+                # phase == "detect": decide whether a <think> block is starting
+                buf += token
+                stripped = buf.lstrip()
+                if stripped.startswith("<think>"):
+                    phase = "skip_think"
+                elif stripped and not "<think>".startswith(stripped):
+                    # Definitely not a thinking block — flush and stream from here
+                    phase = "passthrough"
+                    yield buf
+            # Stream ended mid-detect (only a partial "<think>" prefix arrived): flush it
+            if phase == "detect" and buf:
+                yield buf
+    logger.info("_llm_stream: %d tokens, raw[:200]=%r", token_count, "".join(raw_accum)[:200])
 
 
 def _merge_comma_segments(segments: list) -> list:
@@ -1164,8 +1190,8 @@ async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current
             r = await client.post(f"{TTS_URL}/synthesize", json={"text": original, "lang": source_lang})
             r.raise_for_status()
             audio_original = base64.b64encode(r.content).decode()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("TTS original failed (lang=%s): %s", source_lang, e)
     # audio_translated generated after we have the translation (inside stream)
 
     # Single streaming call: JSON header then explanation tokens
@@ -1227,8 +1253,8 @@ async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current
                             _r.raise_for_status()
                             audio_trl = base64.b64encode(_r.content).decode()
                         yield f"data: {json.dumps({'type': 'tts_translated', 'audio': audio_trl})}\n\n"
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("TTS translated failed (lang=%s): %s", target_lang, e)
                     # Emit any explanation tokens that came after ---
                     after = parts[1].lstrip("\n")
                     if after:

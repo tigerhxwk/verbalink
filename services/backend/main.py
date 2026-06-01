@@ -1276,8 +1276,11 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
         pass
 
     system_msg = (
-        f'You are a language tutor helping a student learn {src} through the audiobook "{row["title"]}".\n'
-        f"Answer in {tgt}. Be concise and educational.\n"
+        f'You are a language tutor helping a student with the audiobook "{row["title"]}" '
+        f'(original language: {src}, the student is translating to {tgt}).\n'
+        f"ALWAYS reply in the SAME language the student writes their question in. "
+        f"If they write in {tgt}, answer in {tgt}; if in {src}, answer in {src}. "
+        f"Be concise and educational.\n"
         + (f'Current passage: "{context_text}"\n' if context_text else "")
     )
 

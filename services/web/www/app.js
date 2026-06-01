@@ -219,12 +219,12 @@ function renderDashboard() {
         <div class="continue-hero-bar">
           <div class="continue-hero-progress"><div style="width:${pct}%"></div></div>
           <span class="continue-hero-pct">${pct}%</span>
-          <div class="continue-hero-play">
+          <div class="continue-hero-play" id="continue-hero-play">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
           </div>
         </div>
       </div>`;
-    $('continue-hero').onclick = () => openBook(heroBook);
+    $('continue-hero').onclick = () => openBook(heroBook, null, true);  // hero click → open + autoplay
   } else {
     heroSec.classList.add('hidden');
   }
@@ -516,12 +516,8 @@ function makeBookCard(book) {
   const dotCls = { done:'dot-done', pending:'dot-pending', processing:'dot-processing', error:'dot-error' }[book.transcription_status] || 'dot-pending';
   const isProcessing = book.transcription_status === 'processing';
   const statusTxt = isProcessing ? 'transcribing…' : book.transcription_status;
-  const canRetranscribe = book.transcription_status === 'done' || book.transcription_status === 'error';
   card.innerHTML = `
-    <button class="book-delete" data-id="${book.id}" title="Delete">✕</button>
-    ${canRetranscribe ? `<button class="book-retranscribe" data-id="${book.id}" title="Re-transcribe (improves sentence timing)">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-    </button>` : ''}
+    <button class="book-delete" data-id="${book.id}" title="Delete book" aria-label="Delete book">✕</button>
     <div class="book-card-cover"><div class="book-card-cover-inner" style="background:${bookGradient(book.title)}">${bookCoverInner(book.title)}</div></div>
     <div class="book-card-body">
       <div class="book-card-title">${esc(book.title)}</div>
@@ -533,8 +529,7 @@ function makeBookCard(book) {
       ${pct > 0 ? `<div class="book-card-progress"><div style="width:${pct}%"></div></div>` : ''}
     </div>`;
   card.querySelector('.book-delete').addEventListener('click', e => { e.stopPropagation(); deleteBook(book.id); });
-  card.querySelector('.book-retranscribe')?.addEventListener('click', e => { e.stopPropagation(); retranscribeBook(book.id); });
-  card.addEventListener('click', e => { if (!e.target.closest('.book-delete') && !e.target.closest('.book-retranscribe')) openBook(book); });
+  card.addEventListener('click', e => { if (!e.target.closest('.book-delete')) openBook(book); });
   return card;
 }
 
@@ -555,15 +550,6 @@ async function deleteBook(id) {
   await loadAll();
 }
 
-async function retranscribeBook(id) {
-  if (!confirm('Re-transcribe this book? This regenerates the transcript with precise sentence timing. The current transcript will be replaced.')) return;
-  try {
-    await api('POST', `/api/books/${id}/retranscribe`);
-    await loadAll();  // status flips to pending/processing; progress bar takes over
-  } catch (err) {
-    alert('Re-transcribe failed: ' + err.message);
-  }
-}
 
 // ── Book settings persistence ─────────────────────────────────────────────────
 let _settingsSaveTimer = null;
@@ -577,7 +563,16 @@ function saveBookSettings(patch) {
 }
 
 // ── Open book / player ────────────────────────────────────────────────────────
-async function openBook(book, collId = null) {
+function _startAudio(bookId, prog, autoplay) {
+  audioEl.src = `/api/books/${bookId}/audio`;
+  audioEl.load();
+  audioEl.addEventListener('loadedmetadata', () => {
+    if (prog > 0) audioEl.currentTime = prog;
+    if (autoplay) audioEl.play().catch(() => {});
+  }, { once: true });
+}
+
+async function openBook(book, collId = null, autoplay = false) {
   S.book = book;
   S.transcript = [];
   S.activeIdx  = -1;
@@ -620,21 +615,11 @@ async function openBook(book, collId = null) {
     $('pf-tgt-sel').value = s.target_lang || book.target_lang || 'en';
     // Progress
     const prog = s.progress_sec || savedPos(book.id) || 0;
-    if (prog > 0) {
-      audioEl.src = `/api/books/${book.id}/audio`;
-      audioEl.load();
-      audioEl.addEventListener('loadedmetadata', () => { audioEl.currentTime = prog; }, { once: true });
-    } else {
-      audioEl.src = `/api/books/${book.id}/audio`;
-      audioEl.load();
-    }
+    _startAudio(book.id, prog, autoplay);
   } catch {
     // Fallback to localStorage
     $('pf-tgt-sel').value = book.target_lang || 'en';
-    audioEl.src = `/api/books/${book.id}/audio`;
-    audioEl.load();
-    const saved = savedPos(book.id);
-    if (saved > 0) audioEl.addEventListener('loadedmetadata', () => { audioEl.currentTime = saved; }, { once: true });
+    _startAudio(book.id, savedPos(book.id) || 0, autoplay);
   }
 
   miniPlayer.classList.remove('hidden');
@@ -967,6 +952,8 @@ async function runClarify() {
 
   try {
     const expl = $('cl-explanation');
+    const panel = $('pf-clarify-panel');
+    let sentenceStart = audioEl.currentTime;
 
     await streamPost('/api/clarify/stream',
       { book_id: S.book.id, position_sec: audioEl.currentTime, mode: _clarifyMode },
@@ -977,15 +964,21 @@ async function runClarify() {
           $('cl-original').textContent   = ev.original_text;
           $('cl-translated').textContent = ev.translated_text;
           renderClTerms(ev.terms || []);
-          setClStatus('');
+          setClStatus('Explaining…', true);
           expl.classList.remove('hidden');
           _audioOrigB64 = ev.audio_original || null;
           _audioTrlB64  = ev.audio_translated || null;
           $('cl-tts-orig').disabled = !_audioOrigB64;
           $('cl-tts-trl').disabled  = !_audioTrlB64;
-          startAutoResume(ev.sentence_start);
+          sentenceStart = ev.sentence_start;
+          panel.scrollTop = panel.scrollHeight;
         } else if (ev.type === 'token') {
           expl.textContent += ev.text;
+          panel.scrollTop = panel.scrollHeight;  // follow streaming text
+        } else if (ev.type === 'done') {
+          // Only start the auto-continue countdown after the explanation is fully streamed
+          setClStatus('');
+          startAutoResume(sentenceStart);
         }
       }
     );
@@ -1017,12 +1010,20 @@ $('cl-close-btn').addEventListener('click', () => { clearAutoResume(); closeClPa
 // ── Dialogue ──────────────────────────────────────────────────────────────────
 let _chatStreaming = false;
 
+function scrollChatDown() {
+  const msgs = $('cl-chat-messages');
+  msgs.scrollTop = msgs.scrollHeight;
+  // Also scroll the whole clarify panel so the input row stays in view
+  const panel = $('pf-clarify-panel');
+  panel.scrollTop = panel.scrollHeight;
+}
+
 function appendChatMsg(role, text, streaming = false) {
   const el = document.createElement('div');
   el.className = `cl-chat-msg ${role}${streaming ? ' streaming' : ''}`;
   el.textContent = text;
   $('cl-chat-messages').appendChild(el);
-  $('cl-chat-messages').scrollTop = $('cl-chat-messages').scrollHeight;
+  scrollChatDown();
   return el;
 }
 
@@ -1044,7 +1045,7 @@ async function sendChat() {
       (ev) => {
         if (ev.type === 'token') {
           respEl.textContent += ev.text;
-          $('cl-chat-messages').scrollTop = $('cl-chat-messages').scrollHeight;
+          scrollChatDown();
         } else if (ev.type === 'done') {
           respEl.classList.remove('streaming');
         }
@@ -1061,6 +1062,7 @@ async function sendChat() {
 
 $('cl-chat-send').addEventListener('click', sendChat);
 $('cl-chat-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+$('cl-chat-input').addEventListener('focus', () => setTimeout(scrollChatDown, 300));  // after mobile keyboard opens
 
 // ── Playlist ──────────────────────────────────────────────────────────────────
 function renderPlaylist() {
@@ -1121,9 +1123,6 @@ document.addEventListener('keydown', e => {
   if (e.key === ' ')          { e.preventDefault(); if (S.book) { clearAutoResume(); audioEl.paused ? audioEl.play() : audioEl.pause(); } }
   if (e.key === 'ArrowLeft')  { e.preventDefault(); if (S.book) audioEl.currentTime = Math.max(0, audioEl.currentTime - 15); }
   if (e.key === 'ArrowRight') { e.preventDefault(); if (S.book) audioEl.currentTime = Math.min(audioEl.duration || 0, audioEl.currentTime + 15); }
-  if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey) { if (S.book && !S.clarifying) runClarify(); }
-  if (e.key === ',') { e.preventDefault(); jumpSentence(-1); }
-  if (e.key === '.') { e.preventDefault(); jumpSentence(1); }
   if (e.key === 'Escape') {
     if (!$('pf-clarify-panel').classList.contains('hidden')) { closeClPanel(); return; }
     if (!$('pf-right-panel').classList.contains('hidden')) { hideRightPanel(); return; }

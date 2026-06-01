@@ -502,7 +502,8 @@ async def run_transcription(book_id: str, file_path: str):
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
-async def _llm_call(prompt: str, max_tokens: int = 2000) -> str:
+async def _llm_call(prompt: str, max_tokens: int = 2000, no_think: bool = False) -> str:
+    extra = {"chat_template_kwargs": {"enable_thinking": False}} if no_think else {}
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
         resp = await client.post(
             f"{LLM_BASE_URL}/chat/completions",
@@ -512,25 +513,26 @@ async def _llm_call(prompt: str, max_tokens: int = 2000) -> str:
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
                 "max_tokens": max_tokens,
+                **extra,
             },
         )
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"].strip()
-        # Strip <think>...</think> block from reasoning models
         think_end = text.find("</think>")
         if think_end != -1:
             text = text[think_end + 8:].lstrip()
         return text
 
 
-async def _llm_stream(messages: list, max_tokens: int = 1200):
+async def _llm_stream(messages: list, max_tokens: int = 1200, no_think: bool = False):
     """Async generator yielding clean text tokens (thinking stripped) from streaming LLM."""
+    extra = {"chat_template_kwargs": {"enable_thinking": False}} if no_think else {}
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
         async with client.stream(
             "POST", f"{LLM_BASE_URL}/chat/completions",
             headers={"Authorization": "Bearer none"},
             json={"model": LLM_MODEL, "messages": messages, "temperature": 0.3,
-                  "max_tokens": max_tokens, "stream": True},
+                  "max_tokens": max_tokens, "stream": True, **extra},
         ) as resp:
             resp.raise_for_status()
             buf = ""
@@ -592,7 +594,7 @@ async def _analyze_sentence(text: str, source_lang: str, target_lang: str, mode:
         f"Include in \"terms\" only idioms, slang, phraseological units, or culturally-specific expressions. "
         f"Empty array if none."
     )
-    raw = await _llm_call(prompt)
+    raw = await _llm_call(prompt, no_think=True)
     m = re.search(r'\{.*\}', raw, re.DOTALL)
     if m:
         try:
@@ -670,7 +672,7 @@ async def run_translation(book_id: str):
                 f"No markdown, no explanation.\n\n"
                 + json.dumps(texts, ensure_ascii=False)
             )
-            raw = await _llm_call(prompt, max_tokens=3000)
+            raw = await _llm_call(prompt, max_tokens=3000, no_think=True)
             m = re.search(r"\[.*\]", raw, re.DOTALL)
             if not m:
                 raise ValueError(f"No JSON array in LLM response (batch {i}): {raw[:200]}")
@@ -710,7 +712,7 @@ async def detect_language(body: DetectLangBody, user: dict = Depends(current_use
         f"Just the code, nothing else."
     )
     try:
-        raw = await _llm_call(prompt, max_tokens=10)
+        raw = await _llm_call(prompt, max_tokens=10, no_think=True)
         lang = raw.strip().lower().split()[0].rstrip('.,;:')
         if lang in LANG_NAMES:
             return {"lang": lang}
@@ -1075,9 +1077,14 @@ async def _load_segment(book_id: str, user_id: str, position_sec: float):
     async with aiofiles.open(path) as f:
         transcript = json.loads(await f.read())
     segments = _merge_comma_segments(transcript["segments"])
+    # Prefer the segment currently playing (contains position_sec)
+    current = next((s for s in segments if s["start"] <= position_sec <= s["end"]), None)
+    if current:
+        return current, row["source_lang"], row["target_lang"]
+    # Fall back to last completed segment
     done = [s for s in segments if s["end"] <= position_sec]
     if not done:
-        raise HTTPException(400, "No complete sentence before this position")
+        raise HTTPException(400, "No sentence found at this position")
     return done[-1], row["source_lang"], row["target_lang"]
 
 
@@ -1195,7 +1202,7 @@ async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current
     async def generate():
         header_buf = ""
         header_done = False
-        async for token in _llm_stream([{"role": "user", "content": stream_prompt}], max_tokens=1000):
+        async for token in _llm_stream([{"role": "user", "content": stream_prompt}], max_tokens=1000, no_think=True):
             if not header_done:
                 header_buf += token
                 if "---" in header_buf:
@@ -1414,7 +1421,7 @@ async def generate_essay_prompt(req: EssayPromptRequest, user: dict = Depends(cu
         f"Target length: 300-500 characters. "
         f"Output ONLY the task text, nothing else."
     )
-    essay_prompt_text = await _llm_call(prompt, max_tokens=300)
+    essay_prompt_text = await _llm_call(prompt, max_tokens=300, no_think=True)
 
     # Save essay record (no essay yet)
     essay_id = str(uuid.uuid4())

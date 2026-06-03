@@ -720,6 +720,7 @@ async function openBook(book, collId = null, autoplay = false) {
   // Load the initial transcript window around the saved position
   ensureWindow(savedPos(book.id) || 0, true);
   loadChapters(book.id);
+  loadChatHistory(book.id);
 
   // Load playlist when opened from a collection
   if (collId) {
@@ -733,7 +734,9 @@ async function openBook(book, collId = null, autoplay = false) {
   } else {
     S.playlistBooks = [];
   }
-  showRightPanel('transcript');  // reading view is the default
+  // Reading view is the default — but respect the user's collapsed preference
+  if (_transcriptCollapsed) { hideRightPanel(); $('pf-transcript-btn').classList.remove('active'); }
+  else { showRightPanel('transcript'); $('pf-transcript-btn').classList.add('active'); }
 }
 
 // ── Language selector in player ───────────────────────────────────────────────
@@ -942,8 +945,18 @@ function highlightTranscript(idx) {
   if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
+// Collapsed = right panel hidden → controls center (grid drops to single column).
+// Only governs the transcript view; clarify/playlist open explicitly regardless.
 function applyTranscriptCollapsed() {
-  $('pf-transcript-view').classList.toggle('collapsed', _transcriptCollapsed);
+  if (!S.book) return;
+  // Don't disturb an open clarify or playlist panel
+  const rightHidden = $('pf-right-panel').classList.contains('hidden');
+  const clarifyOpen = !rightHidden && !$('pf-clarify-panel').classList.contains('hidden');
+  const playlistOpen = !rightHidden && !$('pf-playlist-view').classList.contains('hidden');
+  if (clarifyOpen || playlistOpen) return;
+  if (_transcriptCollapsed) hideRightPanel();
+  else { showRightPanel('transcript'); highlightTranscript(S.activeIdx); }
+  $('pf-transcript-btn').classList.toggle('active', !_transcriptCollapsed);
 }
 
 function applyBlurUnread() {
@@ -951,13 +964,17 @@ function applyBlurUnread() {
   $('transcript-blur-btn').classList.toggle('active', _blurUnread);
 }
 
-$('transcript-toggle-btn').addEventListener('click', () => {
-  _transcriptCollapsed = !_transcriptCollapsed;
-  localStorage.setItem('transcript_collapsed', _transcriptCollapsed ? '1' : '0');
+function setTranscriptCollapsed(collapsed) {
+  _transcriptCollapsed = collapsed;
+  localStorage.setItem('transcript_collapsed', collapsed ? '1' : '0');
   applyTranscriptCollapsed();
-  if (!_transcriptCollapsed) highlightTranscript(S.activeIdx);
-  saveUserSetting({ transcript_collapsed: _transcriptCollapsed });
-});
+  saveUserSetting({ transcript_collapsed: collapsed });
+}
+
+// In-panel chevron hides the panel (centers controls)
+$('transcript-toggle-btn').addEventListener('click', () => setTranscriptCollapsed(true));
+// Header button toggles the transcript panel on/off
+$('pf-transcript-btn').addEventListener('click', () => setTranscriptCollapsed(!_transcriptCollapsed));
 
 $('transcript-blur-btn').addEventListener('click', () => {
   _blurUnread = !_blurUnread;
@@ -999,7 +1016,6 @@ function showRightPanel(view) {
   $('pf-transcript-view').classList.toggle('hidden', view !== 'transcript');
   $('pf-playlist-view').classList.toggle('hidden', view !== 'playlist');
   $('pf-clarify-panel').classList.toggle('hidden', view !== 'clarify');
-  if (view === 'transcript') applyTranscriptCollapsed();
 }
 
 function hideRightPanel() {
@@ -1012,7 +1028,9 @@ function openClPanel() { showRightPanel('clarify'); }
 
 function closeClPanel() {
   stopTts();
-  showRightPanel('transcript');  // return to the reading view
+  // Return to the reading view, respecting the collapsed preference
+  if (_transcriptCollapsed) hideRightPanel();
+  else { showRightPanel('transcript'); highlightTranscript(S.activeIdx); }
 }
 
 function renderClTerms(terms) {
@@ -1312,10 +1330,21 @@ function scrollChatDown() {
 function appendChatMsg(role, text, streaming = false) {
   const el = document.createElement('div');
   el.className = `cl-chat-msg ${role}${streaming ? ' streaming' : ''}`;
-  el.textContent = text;
+  if (role === 'assistant') el.innerHTML = renderMarkdown(text);
+  else el.textContent = text;
   $('cl-chat-messages').appendChild(el);
   scrollChatDown();
   return el;
+}
+
+// Load this book's stored conversation (full history) into the chat panel.
+async function loadChatHistory(bookId) {
+  const cont = $('cl-chat-messages');
+  cont.innerHTML = '';
+  try {
+    const data = await api('GET', `/api/chat/${bookId}`);
+    (data.messages || []).forEach(m => appendChatMsg(m.role, m.content));
+  } catch {}
 }
 
 async function sendChat() {
@@ -1433,6 +1462,11 @@ function showLogin() {
   $('app').classList.add('hidden');
   $('login-page').classList.remove('hidden');
   $('login-error').textContent = '';
+  clearLoginStamp();
+  // Reset the submit button — it may have been left disabled/"Checking…" by a
+  // prior successful login (e.g. user hit browser Back or logged out).
+  const btn = $('login-submit-btn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Check in'; }
 }
 
 function showApp() {
@@ -1459,22 +1493,25 @@ $('login-form').addEventListener('submit', async e => {
   const password = $('login-password').value;
   const errEl    = $('login-error');
   errEl.textContent = '';
+  clearLoginStamp();
   if (!username || !password) { errEl.textContent = 'Enter username and password.'; return; }
   const btn = $('login-submit-btn');
   btn.disabled = true;
-  btn.textContent = 'Signing in…';
+  btn.textContent = 'Checking…';
   try {
     const user = await api('POST', '/api/auth/login', { username, password });
     S.currentUser = user;
-    showApp();
-    loadAll();
+    showLoginStamp('ok');
+    // Let the "Admitted" stamp land before swapping to the app.
+    setTimeout(() => { showApp(); loadAll(); loadUserSettings(); }, 680);
   } catch (err) {
     let msg = 'Invalid username or password.';
     try { const p = JSON.parse(err.message); if (p.detail) msg = p.detail; } catch {}
     if (msg.toLowerCase().includes('locked')) msg = 'Account temporarily locked. Try again later.';
+    showLoginStamp('fail');
     errEl.textContent = msg;
     btn.disabled = false;
-    btn.textContent = 'Sign in';
+    btn.textContent = 'Check in';
   }
 });
 
@@ -1503,6 +1540,10 @@ async function loadUserSettings() {
     localStorage.setItem('transcript_collapsed', _transcriptCollapsed ? '1' : '0');
     applyBlurUnread();
     applyTranscriptCollapsed();
+    if (_userSettings.theme) {                 // DB is source of truth for theme
+      localStorage.setItem('theme', _userSettings.theme);
+      applyTheme(_userSettings.theme);
+    }
   } catch {}
 }
 
@@ -1694,6 +1735,259 @@ audioEl.addEventListener('timeupdate', () => {
   if (!S.seeking) checkEssayTrigger(audioEl.currentTime);
 });
 
+// ── Theme ───────────────────────────────────────────────────────────────────────
+const THEME_ICONS = {
+  // sun
+  light:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  // moon
+  dark:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+  // auto (half-filled disc)
+  system: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
+};
+const _prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let _themePref = localStorage.getItem('theme') || 'system';
+
+function resolvedTheme(pref) {
+  if (pref === 'system') return (_prefersDark && _prefersDark.matches) ? 'dark' : 'light';
+  return pref;
+}
+function applyTheme(pref) {
+  _themePref = pref;
+  document.documentElement.setAttribute('data-theme', resolvedTheme(pref));
+  // Login-page toggle (icon button, pre-auth)
+  const loginBtn = $('theme-toggle-login');
+  if (loginBtn) {
+    loginBtn.innerHTML = THEME_ICONS[pref] || THEME_ICONS.system;
+    loginBtn.title = pref === 'system' ? 'Theme: auto (follows system)' : 'Theme: ' + pref;
+  }
+  // Settings-modal segmented control
+  document.querySelectorAll('#theme-seg .seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.theme === pref));
+}
+function setTheme(pref) {
+  applyTheme(pref);
+  localStorage.setItem('theme', pref);
+  saveUserSetting({ theme: pref });   // persists to DB when logged in (guarded)
+}
+function cycleTheme() {
+  const order = ['system', 'light', 'dark'];
+  setTheme(order[(order.indexOf(_themePref) + 1) % order.length]);
+}
+if (_prefersDark && _prefersDark.addEventListener) {
+  _prefersDark.addEventListener('change', () => { if (_themePref === 'system') applyTheme('system'); });
+}
+// Login page: icon cycles Auto→Light→Dark. Settings modal: explicit segment buttons.
+$('theme-toggle-login') && $('theme-toggle-login').addEventListener('click', cycleTheme);
+document.querySelectorAll('#theme-seg .seg-btn').forEach(b =>
+  b.addEventListener('click', () => setTheme(b.dataset.theme)));
+
+// ── Login stamp ───────────────────────────────────────────────────────────────
+function showLoginStamp(kind) {            // 'ok' | 'fail'
+  const st = $('login-stamp');
+  if (!st) return;
+  st.textContent = kind === 'ok' ? 'Admitted' : 'Denied';
+  st.classList.remove('stamp-show', 'stamp-ok', 'stamp-fail');
+  void st.offsetWidth;                     // reflow → restart animation
+  st.classList.add('stamp-show', kind === 'ok' ? 'stamp-ok' : 'stamp-fail');
+  if (kind === 'fail') {
+    const ticket = $('login-ticket');
+    if (ticket) { ticket.classList.remove('shake'); void ticket.offsetWidth; ticket.classList.add('shake'); }
+  }
+}
+function clearLoginStamp() {
+  const st = $('login-stamp');
+  if (st) st.classList.remove('stamp-show', 'stamp-ok', 'stamp-fail');
+}
+
+// ════════════════ MOBILE READING MODE ════════════════
+const READER = { open: false, fontScale: 1.0, lineSpacing: 1.6, brightness: 1.0, clSeg: null, clarifying: false };
+
+function clampNum(v, lo, hi, dflt) {
+  v = parseFloat(v);
+  if (!isFinite(v)) return dflt;
+  return Math.max(lo, Math.min(hi, v));
+}
+function applyReaderPrefs() {
+  const rm = $('reader-mode');
+  rm.style.setProperty('--reader-font-scale', READER.fontScale);
+  rm.style.setProperty('--reader-line', READER.lineSpacing);
+  $('reader-dim').style.opacity = String(1 - READER.brightness);
+  $('rc-font-val').textContent = Math.round(READER.fontScale * 100) + '%';
+  $('rc-line-val').textContent = READER.lineSpacing.toFixed(1);
+  $('rc-bright').value = String(Math.round(READER.brightness * 100));
+}
+function loadReaderPrefs() {
+  READER.fontScale   = clampNum(_userSettings.reader_font_scale,   0.6, 2.4, 1.0);
+  READER.lineSpacing = clampNum(_userSettings.reader_line_spacing, 1.2, 2.4, 1.6);
+  READER.brightness  = clampNum(_userSettings.reader_brightness,   0.3, 1.0, 1.0);
+  applyReaderPrefs();
+}
+
+// Build the reading page from the current transcript window, grouped into paragraphs.
+function renderReaderPage() {
+  const page = $('reader-page');
+  const segs = S.transcript || [];
+  page.innerHTML = '';
+  if (!segs.length) {
+    page.innerHTML = '<div class="reader-empty">Nothing transcribed here yet.</div>';
+    return;
+  }
+  let para = document.createElement('p');
+  para.className = 'reader-para';
+  segs.forEach((seg, i) => {
+    const span = document.createElement('span');
+    span.className = 'reader-sent' + (i === S.activeIdx ? ' active' : '');
+    span.dataset.i = i;
+    span.textContent = seg.text.trim() + ' ';
+    span.addEventListener('click', () => openReaderClarify(seg));
+    para.appendChild(span);
+    if ((i + 1) % 4 === 0) {                       // ~4 sentences per paragraph
+      page.appendChild(para);
+      para = document.createElement('p');
+      para.className = 'reader-para';
+    }
+  });
+  if (para.childNodes.length) page.appendChild(para);
+}
+function highlightReaderSent(idx) {
+  if (!READER.open) return;
+  $('reader-page').querySelectorAll('.reader-sent').forEach(el =>
+    el.classList.toggle('active', +el.dataset.i === idx));
+}
+
+async function openReader() {
+  if (!S.book) return;
+  READER.open = true;
+  $('reader-title').textContent = S.book.title || 'Reading';
+  loadReaderPrefs();
+  try { await ensureWindow(audioEl.currentTime || 0, true); } catch {}
+  renderReaderPage();
+  updateReaderPlayIcon();
+  updateReaderProgress();
+  $('reader-mode').classList.remove('hidden');
+  const active = $('reader-page').querySelector('.reader-sent.active');
+  if (active) active.scrollIntoView({ block: 'center' });
+}
+function closeReader() {
+  READER.open = false;
+  $('reader-mode').classList.add('hidden');
+  $('reader-cl-bg').classList.add('hidden');
+  $('reader-ctrl-bg').classList.add('hidden');
+}
+
+// ── Reading controls (persist to account) ──
+function setReaderFont(delta)  { READER.fontScale   = clampNum(READER.fontScale + delta,   0.6, 2.4, 1.0); applyReaderPrefs(); saveUserSetting({ reader_font_scale: READER.fontScale }); }
+function setReaderLine(delta)  { READER.lineSpacing = clampNum(READER.lineSpacing + delta, 1.2, 2.4, 1.6); applyReaderPrefs(); saveUserSetting({ reader_line_spacing: READER.lineSpacing }); }
+function setReaderBright(pct)   { READER.brightness  = clampNum(pct / 100,                  0.3, 1.0, 1.0); applyReaderPrefs(); saveUserSetting({ reader_brightness: READER.brightness }); }
+
+// ── Tap-a-line clarify sheet (reuses /api/clarify/stream; playback ONLY via Play button) ──
+function setRclStatus(msg, dot = false) {
+  $('rcl-status').innerHTML = (dot ? '<span class="cl-status-dot"></span>' : '') + (msg || '');
+}
+function renderRclTerms(terms) {
+  const box = $('rcl-terms');
+  if (!terms || !terms.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.innerHTML = terms.map(t =>
+    `<span class="rcl-term"><b>${esc(t.term)}</b> — ${esc(t.meaning || '')}</span>`).join('');
+  box.classList.remove('hidden');
+}
+async function openReaderClarify(seg) {
+  if (READER.clarifying) return;
+  READER.clSeg = seg;
+  $('reader-cl-bg').classList.remove('hidden');
+  $('rcl-original').textContent   = seg.text.trim();
+  $('rcl-translated').textContent = '';
+  $('rcl-explanation').textContent = '';
+  renderRclTerms([]);
+  $('rcl-src').textContent = '';
+  $('rcl-tgt').textContent = '';
+  setRclStatus('Analyzing…', true);
+  READER.clarifying = true;
+  const pos = (seg.start + seg.end) / 2;
+  try {
+    await streamPost('/api/clarify/stream',
+      { book_id: S.book.id, position_sec: pos, mode: _clarifyMode },
+      (ev) => {
+        if (ev.type === 'meta') {
+          $('rcl-src').textContent = LANG[ev.source_lang] || ev.source_lang;
+          $('rcl-tgt').textContent = LANG[ev.target_lang] || ev.target_lang;
+          $('rcl-original').textContent   = ev.original_text;
+          $('rcl-translated').textContent = ev.translated_text;
+          renderRclTerms(ev.terms || []);
+          setRclStatus('Explaining…', true);
+        } else if (ev.type === 'token') {
+          $('rcl-explanation').textContent += ev.text;
+          const sheet = $('reader-cl-sheet'); sheet.scrollTop = sheet.scrollHeight;
+        } else if (ev.type === 'done') {
+          setRclStatus('');                  // no autoplay — manual Play only
+        }
+      });
+  } catch (err) {
+    if (err.message !== 'Unauthorized') {
+      let msg = err.message; try { const p = JSON.parse(msg); if (p.detail) msg = p.detail; } catch {}
+      setRclStatus(msg);
+    }
+  } finally {
+    READER.clarifying = false;
+  }
+}
+function playReaderLine() {
+  if (!READER.clSeg) return;
+  stopTts();
+  clearAutoResume();
+  audioEl.currentTime = READER.clSeg.start;
+  audioEl.play().catch(() => {});
+  updateReaderPlayIcon();
+}
+
+// ── Reader playback bar ──
+function updateReaderPlayIcon() {
+  const p = $('reader-play-icon');
+  if (!p) return;
+  p.innerHTML = audioEl.paused ? '<path d="M8 5v14l11-7z"/>' : '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>';
+}
+function updateReaderProgress() {
+  if (!READER.open) return;
+  const d = audioEl.duration || 0, c = audioEl.currentTime || 0;
+  $('reader-prog-fill').style.width = d ? (c / d * 100) + '%' : '0%';
+  $('reader-time').textContent = fmt(c);
+}
+
+// ── Reader event wiring ──
+$('pf-read-btn').addEventListener('click', openReader);
+$('reader-back').addEventListener('click', closeReader);
+$('reader-aa').addEventListener('click', () => $('reader-ctrl-bg').classList.remove('hidden'));
+$('reader-play').addEventListener('click', () => { audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause(); });
+$('reader-prog').addEventListener('click', (e) => {
+  const r = e.currentTarget.getBoundingClientRect();
+  if (audioEl.duration) audioEl.currentTime = ((e.clientX - r.left) / r.width) * audioEl.duration;
+});
+$('rc-font-dec').addEventListener('click', () => setReaderFont(-0.1));
+$('rc-font-inc').addEventListener('click', () => setReaderFont(+0.1));
+$('rc-line-dec').addEventListener('click', () => setReaderLine(-0.1));
+$('rc-line-inc').addEventListener('click', () => setReaderLine(+0.1));
+$('rc-bright').addEventListener('input', (e) => setReaderBright(+e.target.value));
+$('rcl-play').addEventListener('click', playReaderLine);
+$('rcl-close').addEventListener('click', () => $('reader-cl-bg').classList.add('hidden'));
+// Tap the dimmed backdrop (not the sheet) to dismiss
+$('reader-ctrl-bg').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden'); });
+$('reader-cl-bg').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden'); });
+
+audioEl.addEventListener('timeupdate', () => { if (READER.open) { updateReaderProgress(); highlightReaderSent(S.activeIdx); } });
+audioEl.addEventListener('play',  updateReaderPlayIcon);
+audioEl.addEventListener('pause', updateReaderPlayIcon);
+
+// Browser Back can restore this page from the bfcache mid-login (button frozen
+// on "Checking…"). Re-verify auth and reset the login button on restore.
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    const btn = $('login-submit-btn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Check in'; }
+    checkAuth();
+  }
+});
+
 // ── Init ──────────────────────────────────────────────────────────────────────
+applyTheme(_themePref);
 setGreeting();
 checkAuth();

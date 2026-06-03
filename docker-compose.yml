@@ -15,11 +15,22 @@ services:
       LLM_MODEL: "${LLM_MODEL:-qwen3.6-35b}"
       TTS_URL: "http://tts:8001"
       TRANSCRIPTION_URL: "http://transcription:8002"
+      QDRANT_URL: "http://qdrant:6333"
       DATA_DIR: "/data"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/data
+    networks:
+      - verbalink-net
+
+  # Independent Qdrant for verbalink's per-user transcript RAG (separate from biolab's)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6433:6333"   # host 6433 to avoid clashing with biolab's qdrant (6333)
+    volumes:
+      - qdrant_data:/qdrant/storage
     networks:
       - verbalink-net
 
@@ -44,6 +55,7 @@ services:
 volumes:
   tts_models:
   whisper_models:
+  qdrant_data:
 
 networks:
   verbalink-net:

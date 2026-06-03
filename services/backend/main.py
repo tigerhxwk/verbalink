@@ -72,8 +72,9 @@ pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # In-memory chat history per (user_id, book_id) — resets on server restart
 # Each value: list of {"role": "user"|"assistant", "content": str}
-_chat_history: dict[str, list] = {}
-CHAT_HISTORY_MAX = 20  # messages to keep
+# Chat history lives in the DB (book-scoped). Only this many recent messages are
+# sent to the model as context; the full history is retained for review/recall.
+CHAT_CONTEXT_MESSAGES = 20
 
 # Brute-force protection (in-memory)
 _bf_attempts: dict = {}
@@ -84,8 +85,10 @@ BF_LOCKOUT_MINUTES = 15
 # ── Database ──────────────────────────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")    # readers don't block the writer
+    conn.execute("PRAGMA busy_timeout = 5000")   # wait instead of erroring on a locked write
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -156,6 +159,23 @@ def init_db():
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            book_id TEXT NOT NULL,
+            role TEXT NOT NULL,            -- 'user' | 'assistant'
+            content TEXT NOT NULL,
+            position_sec REAL DEFAULT 0,   -- playback position the message was sent at
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS ix_chat_messages_book
+            ON chat_messages (user_id, book_id, created_at)
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS book_essays (
             id TEXT PRIMARY KEY,
             book_id TEXT NOT NULL,
@@ -182,6 +202,10 @@ def init_db():
         "ALTER TABLE books ADD COLUMN clarify_mode TEXT DEFAULT 'advanced'",
         "ALTER TABLE user_settings ADD COLUMN blur_unread INTEGER DEFAULT 0",
         "ALTER TABLE user_settings ADD COLUMN transcript_collapsed INTEGER DEFAULT 0",
+        "ALTER TABLE user_settings ADD COLUMN theme TEXT DEFAULT 'system'",
+        "ALTER TABLE user_settings ADD COLUMN reader_font_scale REAL DEFAULT 1.0",
+        "ALTER TABLE user_settings ADD COLUMN reader_line_spacing REAL DEFAULT 1.6",
+        "ALTER TABLE user_settings ADD COLUMN reader_brightness REAL DEFAULT 1.0",
     ]:
         try:
             conn.execute(migration)
@@ -1344,18 +1368,27 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
-    """Stream a dialogue response about the current book passage. Maintains per-session history."""
+    """Stream a dialogue response about the current book passage.
+    Full history is persisted in the DB (book-scoped); only a trimmed recent slice
+    is sent to the model as context."""
     conn = get_db()
     row = conn.execute("SELECT source_lang, target_lang, title FROM books WHERE id=? AND user_id=?",
                        (req.book_id, user["id"])).fetchone()
-    conn.close()
     if not row:
+        conn.close()
         raise HTTPException(404)
 
     tgt = LANG_NAMES.get(row["target_lang"], row["target_lang"])
     src = LANG_NAMES.get(row["source_lang"], row["source_lang"])
-    hist_key = f"{user['id']}:{req.book_id}"
-    history = _chat_history.setdefault(hist_key, [])
+
+    # Load the recent slice of this book's history (full history stays in DB)
+    hist_rows = conn.execute(
+        "SELECT role, content FROM chat_messages WHERE user_id=? AND book_id=? "
+        "ORDER BY created_at DESC LIMIT ?",
+        (user["id"], req.book_id, CHAT_CONTEXT_MESSAGES),
+    ).fetchall()
+    conn.close()
+    history = [{"role": r["role"], "content": r["content"]} for r in reversed(hist_rows)]
 
     # Try to get context segment
     context_text = ""
@@ -1391,21 +1424,46 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
             full_response.append(token)
             yield f"data: {json.dumps({'type': 'token', 'text': token})}\n\n"
         yield "data: {\"type\":\"done\"}\n\n"
-        # Save to history
-        history.append({"role": "user", "content": req.message})
-        history.append({"role": "assistant", "content": "".join(full_response)})
-        # Keep last N messages
-        if len(history) > CHAT_HISTORY_MAX:
-            _chat_history[hist_key] = history[-CHAT_HISTORY_MAX:]
+        # Persist both turns to the DB (full history is kept; trimming only affects context)
+        try:
+            c = get_db()
+            now = datetime.utcnow().isoformat()
+            c.execute("INSERT INTO chat_messages (id, user_id, book_id, role, content, position_sec, created_at) "
+                      "VALUES (?,?,?,?,?,?,?)",
+                      (str(uuid.uuid4()), user["id"], req.book_id, "user", req.message, req.position_sec, now))
+            c.execute("INSERT INTO chat_messages (id, user_id, book_id, role, content, position_sec, created_at) "
+                      "VALUES (?,?,?,?,?,?,?)",
+                      (str(uuid.uuid4()), user["id"], req.book_id, "assistant", "".join(full_response),
+                       req.position_sec, now))
+            c.commit()
+            c.close()
+        except Exception as e:
+            logger.warning(f"Failed to persist chat message: {e}")
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.get("/api/chat/{book_id}")
+async def get_chat_history(book_id: str, user: dict = Depends(current_user)):
+    """Full stored chat history for a book (for rendering past conversation on open)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT role, content, position_sec, created_at FROM chat_messages "
+        "WHERE user_id=? AND book_id=? ORDER BY created_at ASC",
+        (user["id"], book_id),
+    ).fetchall()
+    conn.close()
+    return {"messages": [dict(r) for r in rows]}
+
+
 @app.delete("/api/chat/{book_id}")
 async def clear_chat(book_id: str, user: dict = Depends(current_user)):
     """Clear chat history for a book."""
-    _chat_history.pop(f"{user['id']}:{book_id}", None)
+    conn = get_db()
+    conn.execute("DELETE FROM chat_messages WHERE user_id=? AND book_id=?", (user["id"], book_id))
+    conn.commit()
+    conn.close()
     return {"status": "cleared"}
 
 
@@ -1416,6 +1474,10 @@ class UserSettingsBody(BaseModel):
     essay_interval_min:   Optional[int]  = None
     blur_unread:          Optional[bool] = None
     transcript_collapsed: Optional[bool] = None
+    theme:                Optional[str]  = None  # 'system' | 'light' | 'dark'
+    reader_font_scale:    Optional[float] = None
+    reader_line_spacing:  Optional[float] = None
+    reader_brightness:    Optional[float] = None
 
 
 @app.get("/api/settings")
@@ -1424,7 +1486,10 @@ async def get_settings(user: dict = Depends(current_user)):
     row = conn.execute("SELECT * FROM user_settings WHERE user_id=?", (user["id"],)).fetchone()
     conn.close()
     defaults = {"essay_enabled": True, "essay_interval_min": 30,
-                "blur_unread": False, "transcript_collapsed": False}
+                "blur_unread": False, "transcript_collapsed": False,
+                "theme": "system",
+                "reader_font_scale": 1.0, "reader_line_spacing": 1.6,
+                "reader_brightness": 1.0}
     if not row:
         return defaults
     d = dict(row)
@@ -1450,6 +1515,14 @@ async def save_settings(body: UserSettingsBody, user: dict = Depends(current_use
         fields.append("blur_unread=?"); values.append(int(body.blur_unread))
     if body.transcript_collapsed is not None:
         fields.append("transcript_collapsed=?"); values.append(int(body.transcript_collapsed))
+    if body.theme is not None and body.theme in ("system", "light", "dark"):
+        fields.append("theme=?"); values.append(body.theme)
+    if body.reader_font_scale is not None:
+        fields.append("reader_font_scale=?"); values.append(max(0.6, min(2.4, body.reader_font_scale)))
+    if body.reader_line_spacing is not None:
+        fields.append("reader_line_spacing=?"); values.append(max(1.2, min(2.4, body.reader_line_spacing)))
+    if body.reader_brightness is not None:
+        fields.append("reader_brightness=?"); values.append(max(0.3, min(1.0, body.reader_brightness)))
     if fields:
         values.append(user["id"])
         conn.execute(f"UPDATE user_settings SET {', '.join(fields)} WHERE user_id=?", values)

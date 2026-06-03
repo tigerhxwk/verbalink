@@ -1515,6 +1515,17 @@ $('login-form').addEventListener('submit', async e => {
   }
 });
 
+// Password show/hide toggle
+$('pw-toggle') && $('pw-toggle').addEventListener('click', () => {
+  const inp = $('login-password'), btn = $('pw-toggle');
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  btn.classList.toggle('on', show);
+  btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+  btn.title = show ? 'Hide password' : 'Show password';
+  inp.focus();
+});
+
 $('logout-btn').addEventListener('click', async () => {
   try { await api('POST', '/api/auth/logout'); } catch {}
   S.currentUser = null;
@@ -1972,6 +1983,9 @@ $('rcl-close').addEventListener('click', () => $('reader-cl-bg').classList.add('
 // Tap the dimmed backdrop (not the sheet) to dismiss
 $('reader-ctrl-bg').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden'); });
 $('reader-cl-bg').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden'); });
+// The grip bar at the top of each sheet dismisses it (tap to close)
+document.querySelectorAll('#reader-mode .sheet-grip').forEach(g =>
+  g.addEventListener('click', () => { const bg = g.closest('.reader-sheet-bg'); if (bg) bg.classList.add('hidden'); }));
 
 audioEl.addEventListener('timeupdate', () => { if (READER.open) { updateReaderProgress(); highlightReaderSent(S.activeIdx); } });
 audioEl.addEventListener('play',  updateReaderPlayIcon);

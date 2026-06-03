@@ -1148,9 +1148,14 @@ select:focus { border-color: var(--blue); }
 .pf-controls {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 14px;
   margin-bottom: 24px;
 }
+/* Clarify sits on its own row above the transport controls */
+.pf-clarify-row { display: flex; justify-content: center; margin-bottom: 14px; }
+/* Reader + transcript buttons grouped together at the right of the player header */
+.pf-header-btns { display: flex; align-items: center; gap: 4px; }
 .pf-btn {
   position: relative;
   width: 46px; height: 46px;
@@ -2028,6 +2033,21 @@ select:focus { border-color: var(--blue); }
 }
 .login-field input::placeholder { color: var(--text-3); }
 
+/* Password field show/hide toggle */
+.login-input-wrap { position: relative; }
+.login-input-wrap input { padding-right: 44px; }
+.pw-toggle {
+  position: absolute;
+  right: 6px; top: 50%; transform: translateY(-50%);
+  width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3);
+  border-radius: 8px;
+  transition: color var(--t-fast);
+}
+.pw-toggle:hover { color: var(--amber); }
+.pw-toggle.on { color: var(--amber); }
+
 .login-error {
   min-height: 18px;
   font-size: 15px;
@@ -2307,7 +2327,9 @@ select:focus { border-color: var(--blue); }
   max-height: 82vh; overflow-y: auto;
 }
 @keyframes sheet-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
-.sheet-grip { width: 38px; height: 4px; border-radius: 2px; background: var(--border-2); margin: 6px auto 12px; }
+.sheet-grip { display: block; width: 100%; padding: 10px 0 12px; cursor: pointer; background: none; border: none; }
+.sheet-grip::before { content: ''; display: block; width: 40px; height: 4px; border-radius: 2px; background: var(--border-2); margin: 0 auto; transition: background var(--t-fast); }
+.sheet-grip:hover::before, .sheet-grip:active::before { background: var(--text-3); width: 52px; }
 .sheet-title { font-family: var(--f-body); font-weight: 700; font-size: 17px; margin-bottom: 12px; }
 
 .reader-ctrl-row {
@@ -2341,3 +2363,47 @@ select:focus { border-color: var(--blue); }
 
 /* Reader entry button visible at all sizes; reading mode itself is the mobile experience */
 #pf-read-btn svg { color: var(--text-2); }
+
+/* ════════════════ MOBILE / RESPONSIVE (≤ 760px) ════════════════ */
+@media (max-width: 760px) {
+  /* App stacks: top navbar over content */
+  #app { flex-direction: column; }
+
+  /* Sidebar → horizontal scrollable top navbar */
+  #sidebar {
+    width: 100%; height: auto;
+    flex-direction: row; align-items: center;
+    border-right: none; border-bottom: 1px solid var(--border);
+    padding: 0 6px; gap: 4px;
+    overflow-x: auto; overflow-y: hidden;
+    flex-shrink: 0;
+  }
+  #sidebar::-webkit-scrollbar { display: none; }
+  .sidebar-logo { border-bottom: none; margin: 0; padding: 8px 6px; flex-shrink: 0; }
+  .sidebar-logo .logo-text { display: none; }      /* icon-only logo on mobile */
+  .nav-links { flex-direction: row; flex: 1; padding: 0; gap: 2px; overflow-x: auto; }
+  .nav-links::-webkit-scrollbar { display: none; }
+  .nav-item { width: auto; flex-shrink: 0; padding: 8px 11px; font-size: 14px; gap: 7px; }
+  .nav-item.active { border-left: none; border-bottom: 2px solid var(--blue); padding-left: 11px; }
+
+  /* Footer → compact icon cluster on the right */
+  .sidebar-footer { border-top: none; margin-top: 0; padding: 0; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .sidebar-user { margin-bottom: 0; padding: 4px; gap: 4px; }
+  .sidebar-user > svg:first-child, .sidebar-username { display: none; }
+  .add-book-btn { width: auto; padding: 9px; gap: 0; font-size: 0; }   /* + icon only */
+
+  /* Main: full width */
+  #main { padding-bottom: calc(var(--mini-h) + 16px); }
+  .page-header { padding: 20px 16px 16px; margin-bottom: 20px; }
+  .page-title { font-size: 26px; }
+  .section { padding: 0 16px; margin-bottom: 26px; }
+  .books-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 0 16px; }
+  .collections-grid, .collections-full-grid { grid-template-columns: repeat(2, 1fr); }
+
+  /* Mini player + player span full width (no left sidebar offset) */
+  #mini-player { left: 0; }
+  .pf-header { padding: 12px 14px; }
+  #player-full.pf-panel-open .pf-body { grid-template-columns: 1fr; }
+  .pf-left { padding: 22px 18px; max-width: 100%; }
+  .pf-cover { width: 170px; height: 170px; margin-bottom: 20px; }
+}

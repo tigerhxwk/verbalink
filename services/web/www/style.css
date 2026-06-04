@@ -2274,23 +2274,52 @@ select:focus { border-color: var(--blue); }
 .reader-aa span:first-child { font-size: 19px; }
 .reader-aa-sm { font-size: 13px; }
 
+/* Horizontal paginated scroller — content flows into full-height columns (book pages) */
 .reader-scroll {
   position: relative;
   z-index: 1;
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
+  padding: 0 22px;
+  overscroll-behavior-x: contain;
 }
+.reader-scroll::-webkit-scrollbar { display: none; }
 .reader-page {
-  max-width: 42rem;
-  margin: 0 auto;
-  padding: 26px 22px 70px;
+  height: 100%;
+  column-fill: auto;
+  /* column-width + column-gap set by JS so one column == one page width */
+  padding: 26px 0 30px;
   font-family: var(--f-body);
   font-size: calc(1.125rem * var(--reader-font-scale));  /* rem → respects user/system text size */
   line-height: var(--reader-line);
   color: var(--text);
 }
 .reader-para { margin: 0 0 1.05em; text-align: justify; -webkit-hyphens: auto; hyphens: auto; }
+
+/* Page-turn arrows (desktop); mobile uses swipe */
+.reader-page-btn {
+  position: absolute;
+  top: 50%; transform: translateY(-50%);
+  z-index: 8;
+  width: 44px; height: 64px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3);
+  background: var(--glass);
+  border: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  transition: color var(--t-fast), background var(--t-fast), opacity var(--t-fast);
+}
+.reader-page-btn:hover { color: var(--amber); background: var(--amber-dim); }
+.reader-page-btn:disabled { opacity: 0.25; cursor: default; }
+.reader-page-prev { left: 0; border-radius: 0 12px 12px 0; }
+.reader-page-next { right: 0; border-radius: 12px 0 0 12px; }
+@media (max-width: 760px), (pointer: coarse) {
+  .reader-page-btn { display: none; }   /* swipe instead of arrows on touch */
+}
 .reader-sent {
   cursor: pointer;
   border-radius: 4px;
@@ -2360,9 +2389,15 @@ select:focus { border-color: var(--blue); }
 .rcl-term b { color: var(--amber); font-weight: 600; }
 .rcl-explanation { font-family: var(--f-ui); font-size: 15px; line-height: 1.6; color: var(--text-2); white-space: pre-wrap; }
 .rcl-status { font-family: var(--f-ui); font-size: 13px; color: var(--text-3); margin-top: 12px; min-height: 16px; display: flex; align-items: center; gap: 7px; }
+.rcl-mode { display: flex; gap: 6px; margin-bottom: 14px; }
+.rcl-chat { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.rcl-chat-messages { display: flex; flex-direction: column; gap: 8px; max-height: 38vh; overflow-y: auto; margin-bottom: 10px; }
+.rcl-chat-messages:empty { display: none; }
 
 /* Reader entry button visible at all sizes; reading mode itself is the mobile experience */
 #pf-read-btn svg { color: var(--text-2); }
+
+@keyframes sheet-down { from { transform: translateY(-100%); } to { transform: translateY(0); } }
 
 /* ════════════════ MOBILE / RESPONSIVE (≤ 760px) ════════════════ */
 @media (max-width: 760px) {
@@ -2406,4 +2441,37 @@ select:focus { border-color: var(--blue); }
   #player-full.pf-panel-open .pf-body { grid-template-columns: 1fr; }
   .pf-left { padding: 22px 18px; max-width: 100%; }
   .pf-cover { width: 170px; height: 170px; margin-bottom: 20px; }
+
+  /* The player's right-panel views become overlay sheets on mobile:
+     transcript = top sheet, clarify + playlist = bottom sheets. Reuses all
+     existing panel logic (mode toggle, chat, TTS, picker). */
+  #pf-right-panel:not(.hidden) {
+    position: fixed; inset: 0; z-index: 80;
+    background: rgba(0,0,0,0.5);
+    display: block; overflow: hidden;
+    animation: sheet-fade var(--t-fast) ease-out;
+  }
+  #pf-transcript-view:not(.hidden),
+  #pf-clarify-panel:not(.hidden),
+  #pf-playlist-view:not(.hidden) {
+    position: absolute; left: 0; right: 0;
+    background: var(--surface);
+    overflow-y: auto;
+    box-shadow: 0 0 44px rgba(0,0,0,0.5);
+  }
+  #pf-transcript-view:not(.hidden) {
+    top: 0; max-height: 74vh;
+    border-bottom-left-radius: 18px; border-bottom-right-radius: 18px;
+    border-bottom: 1px solid var(--border-2);
+    padding-top: max(10px, env(safe-area-inset-top));
+    animation: sheet-down var(--t-mid) cubic-bezier(0.2, 0.9, 0.3, 1.1);
+  }
+  #pf-clarify-panel:not(.hidden),
+  #pf-playlist-view:not(.hidden) {
+    bottom: 0; max-height: 88vh;
+    border-top-left-radius: 18px; border-top-right-radius: 18px;
+    border-top: 1px solid var(--border-2);
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    animation: sheet-up var(--t-mid) cubic-bezier(0.2, 0.9, 0.3, 1.1);
+  }
 }

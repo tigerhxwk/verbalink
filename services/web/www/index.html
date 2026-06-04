@@ -569,12 +569,26 @@
     <article class="reader-page" id="reader-page"></article>
   </div>
 
+  <!-- Desktop page-turn arrows (mobile uses swipe) -->
+  <button class="reader-page-btn reader-page-prev" id="reader-prev-page" aria-label="Previous page">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+  </button>
+  <button class="reader-page-btn reader-page-next" id="reader-next-page" aria-label="Next page">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
+
   <footer class="reader-bar reader-bar-bottom" id="reader-playbar">
+    <button class="reader-icon-btn" id="reader-playhere" title="Listen from this page" aria-label="Listen from this page">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h3zM3 19a2 2 0 0 0 2 2h1a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1H3z"/></svg>
+    </button>
     <button class="reader-icon-btn" id="reader-play" aria-label="Play / pause">
       <svg id="reader-play-icon" width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
     </button>
     <div class="reader-prog" id="reader-prog"><div class="reader-prog-fill" id="reader-prog-fill"></div></div>
     <span class="reader-time" id="reader-time">0:00</span>
+    <button class="reader-icon-btn" id="reader-locate" title="Go to current playback" aria-label="Go to current playback">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/></svg>
+    </button>
   </footer>
 
   <!-- Reading controls sheet -->
@@ -621,12 +635,25 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
         </button>
       </div>
+      <div class="rcl-mode cl-mode-row">
+        <button type="button" class="cl-mode-btn" data-mode="advanced">Advanced</button>
+        <button type="button" class="cl-mode-btn" data-mode="beginner">Beginner</button>
+      </div>
       <div class="rcl-body">
         <div class="rcl-original" id="rcl-original"></div>
         <div class="rcl-translated" id="rcl-translated"></div>
         <div class="rcl-terms hidden" id="rcl-terms"></div>
         <div class="rcl-explanation" id="rcl-explanation"></div>
         <div class="rcl-status" id="rcl-status"></div>
+        <div class="rcl-chat">
+          <div class="rcl-chat-messages" id="rcl-chat-messages"></div>
+          <div class="cl-chat-input-row">
+            <input type="text" class="cl-chat-input" id="rcl-chat-input" placeholder="Ask about this passage…" />
+            <button class="cl-chat-send" id="rcl-chat-send" aria-label="Send">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22,2 15,22 11,13 2,9"/></svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

@@ -2389,10 +2389,53 @@ select:focus { border-color: var(--blue); }
 .rcl-term b { color: var(--amber); font-weight: 600; }
 .rcl-explanation { font-family: var(--f-ui); font-size: 15px; line-height: 1.6; color: var(--text-2); white-space: pre-wrap; }
 .rcl-status { font-family: var(--f-ui); font-size: 13px; color: var(--text-3); margin-top: 12px; min-height: 16px; display: flex; align-items: center; gap: 7px; }
+/* Desktop/player clarify panel opened as chat-only (the "Ask" button) */
+#pf-clarify-panel.chat-only .cl-langs,
+#pf-clarify-panel.chat-only .cl-mode-row,
+#pf-clarify-panel.chat-only .cl-picker-wrap,
+#pf-clarify-panel.chat-only .cl-text-row,
+#pf-clarify-panel.chat-only .cl-divider,
+#pf-clarify-panel.chat-only .cl-explanation,
+#pf-clarify-panel.chat-only .cl-terms,
+#pf-clarify-panel.chat-only .cl-status,
+#pf-clarify-panel.chat-only .cl-actions { display: none; }
+
 .rcl-mode { display: flex; gap: 6px; margin-bottom: 14px; }
+/* Chat-only mode (opened from the reader "ask" button, not a tapped line):
+   hide the clarify/translation bits, keep the passage line + chat. */
+.reader-cl-sheet.chat-only .rcl-mode,
+.reader-cl-sheet.chat-only .rcl-translated,
+.reader-cl-sheet.chat-only .rcl-terms,
+.reader-cl-sheet.chat-only .rcl-explanation,
+.reader-cl-sheet.chat-only .rcl-status,
+.reader-cl-sheet.chat-only .rcl-play,
+.reader-cl-sheet.chat-only .rcl-pill,
+.reader-cl-sheet.chat-only .rcl-arrow { display: none; }
+.reader-cl-sheet.chat-only .rcl-original { font-size: 0.95rem; color: var(--text-3); border-left: 2px solid var(--border-2); padding-left: 10px; }
 .rcl-chat { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
 .rcl-chat-messages { display: flex; flex-direction: column; gap: 8px; max-height: 38vh; overflow-y: auto; margin-bottom: 10px; }
 .rcl-chat-messages:empty { display: none; }
+
+/* ── Main-page Librarian card ── */
+.librarian-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.librarian-head {
+  width: 100%;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px;
+  background: none; color: var(--text); cursor: pointer;
+}
+.librarian-title { display: flex; align-items: center; gap: 9px; font-family: var(--f-body); font-weight: 700; font-size: 17px; }
+.librarian-title svg { color: var(--amber); }
+.librarian-chevron { color: var(--text-3); transition: transform var(--t-fast); }
+.librarian-card.collapsed .librarian-chevron { transform: rotate(-90deg); }
+.librarian-card.collapsed .librarian-body { display: none; }
+.librarian-body { padding: 0 18px 16px; }
+.librarian-messages { max-height: 340px; min-height: 56px; overflow-y: auto; margin-bottom: 12px; }
 
 /* Reader entry button visible at all sizes; reading mode itself is the mobile experience */
 #pf-read-btn svg { color: var(--text-2); }

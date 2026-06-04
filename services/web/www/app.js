@@ -949,6 +949,9 @@ function highlightTranscript(idx) {
 // Only governs the transcript view; clarify/playlist open explicitly regardless.
 function applyTranscriptCollapsed() {
   if (!S.book) return;
+  // On mobile the player opens as controls only; the transcript is a manual overlay
+  // (opened from the header button), never auto-shown.
+  if (window.matchMedia('(max-width: 760px)').matches) return;
   // Don't disturb an open clarify or playlist panel
   const rightHidden = $('pf-right-panel').classList.contains('hidden');
   const clarifyOpen = !rightHidden && !$('pf-clarify-panel').classList.contains('hidden');
@@ -974,7 +977,17 @@ function setTranscriptCollapsed(collapsed) {
 // In-panel chevron hides the panel (centers controls)
 $('transcript-toggle-btn').addEventListener('click', () => setTranscriptCollapsed(true));
 // Header button toggles the transcript panel on/off
-$('pf-transcript-btn').addEventListener('click', () => setTranscriptCollapsed(!_transcriptCollapsed));
+$('pf-transcript-btn').addEventListener('click', () => {
+  if (window.matchMedia('(max-width: 760px)').matches) {
+    // Mobile: toggle the transcript sheet directly (don't persist a desktop layout pref)
+    const open = !$('pf-right-panel').classList.contains('hidden')
+              && !$('pf-transcript-view').classList.contains('hidden');
+    if (open) hideRightPanel();
+    else { showRightPanel('transcript'); renderTranscriptScroller(); highlightTranscript(S.activeIdx); }
+    return;
+  }
+  setTranscriptCollapsed(!_transcriptCollapsed);
+});
 
 $('transcript-blur-btn').addEventListener('click', () => {
   _blurUnread = !_blurUnread;
@@ -998,6 +1011,7 @@ function saveUserSetting(patch) {
 
 // Clarify a specific sentence object (used by the scroller rows)
 function analyzeSentenceFor(seg) {
+  _resumeAfterClarify = !audioEl.paused;
   audioEl.pause();
   openClPanel();
   $('cl-original').textContent = '';
@@ -1024,7 +1038,17 @@ function hideRightPanel() {
 }
 
 // ── Clarify ───────────────────────────────────────────────────────────────────
-function openClPanel() { showRightPanel('clarify'); }
+function openClPanel() { $('pf-clarify-panel').classList.remove('chat-only'); showRightPanel('clarify'); }
+
+// Open the clarify panel as chat-only (the "Ask" button) — no line clarified,
+// chat anchored to the current playback passage. Works desktop + mobile.
+function openPlayerChat() {
+  if (!S.book) return;
+  _clarifyPos = audioEl.currentTime;
+  $('pf-clarify-panel').classList.add('chat-only');
+  showRightPanel('clarify');
+  setTimeout(() => { scrollChatDown(); $('cl-chat-input').focus(); }, 100);
+}
 
 function closeClPanel() {
   stopTts();
@@ -1224,8 +1248,12 @@ function buildSentencePicker() {
   return list;
 }
 
+let _resumeAfterClarify = false;   // only auto-continue if audio was playing when clarify began
+let _clarifyPos = null;            // position of the clarified sentence (for chat passage context)
+
 function runClarify() {
   if (!S.book) return;
+  _resumeAfterClarify = !audioEl.paused;
   audioEl.pause();
   clearAutoResume();
   openClPanel();
@@ -1265,6 +1293,7 @@ async function analyzeSentence(positionSec) {
   $('cl-terms').classList.add('hidden');
   $('cl-original').textContent = '…';
   setClStatus('Analyzing…', true);
+  _clarifyPos = positionSec;
 
   try {
     const expl = $('cl-explanation');
@@ -1292,7 +1321,9 @@ async function analyzeSentence(positionSec) {
           panel.scrollTop = panel.scrollHeight;  // follow streaming text
         } else if (ev.type === 'done') {
           setClStatus('');
-          startAutoResume(sentenceStart);  // countdown only after explanation finishes
+          _clarifyPos = sentenceStart;
+          // Only count down to resume if audio was actually playing when we clarified
+          if (_resumeAfterClarify) startAutoResume(sentenceStart);
         }
       }
     );
@@ -1316,6 +1347,7 @@ function setClStatus(msg, dot = false) {
 
 $('clarify-btn').addEventListener('click', runClarify);
 $('mini-clarify-btn').addEventListener('click', runClarify);
+$('pf-chat-btn').addEventListener('click', openPlayerChat);
 
 $('cl-resume-btn').addEventListener('click', () => {
   clearAutoResume();
@@ -1371,7 +1403,8 @@ async function sendChat() {
 
   try {
     await streamPost('/api/chat/stream',
-      { book_id: S.book.id, message: msg, position_sec: audioEl.currentTime },
+      { book_id: S.book.id, message: msg,
+        position_sec: _clarifyPos != null ? _clarifyPos : audioEl.currentTime },
       (ev) => {
         if (ev.type === 'token') {
           raw += ev.text;
@@ -1476,12 +1509,68 @@ function showLogin() {
   // prior successful login (e.g. user hit browser Back or logged out).
   const btn = $('login-submit-btn');
   if (btn) { btn.disabled = false; btn.textContent = 'Check in'; }
+  _librarianLoaded = false;   // next user reloads their own librarian history
 }
+
+// ── Librarian (main-page RAG chat over the user's whole library) ──
+let _librarianLoaded = false;
+let _librarianStreaming = false;
+function appendLibrarianMsg(role, text, streaming = false) {
+  const el = document.createElement('div');
+  el.className = `cl-chat-msg ${role}${streaming ? ' streaming' : ''}`;
+  if (role === 'assistant') el.innerHTML = renderMarkdown(text); else el.textContent = text;
+  const c = $('librarian-messages'); c.appendChild(el); c.scrollTop = c.scrollHeight;
+  return el;
+}
+async function loadLibrarian() {
+  if (_librarianLoaded) return;
+  _librarianLoaded = true;
+  const c = $('librarian-messages');
+  if (!c) return;
+  c.innerHTML = '';
+  try {
+    const d = await api('GET', '/api/librarian');
+    (d.messages || []).forEach(m => appendLibrarianMsg(m.role, m.content));
+    if (!(d.messages || []).length) {
+      appendLibrarianMsg('assistant', "Hi! I'm your librarian. Ask me to recommend something from your shelf, find where you read about a topic, or talk about your books.");
+    }
+  } catch {}
+}
+async function sendLibrarian() {
+  if (_librarianStreaming) return;
+  const input = $('librarian-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  _librarianStreaming = true;
+  $('librarian-send').disabled = true;
+  appendLibrarianMsg('user', msg);
+  const respEl = appendLibrarianMsg('assistant', '', true);
+  let raw = '';
+  try {
+    await streamPost('/api/librarian/stream', { message: msg }, (ev) => {
+      if (ev.type === 'token') { raw += ev.text; respEl.innerHTML = renderMarkdown(raw); const c = $('librarian-messages'); c.scrollTop = c.scrollHeight; }
+      else if (ev.type === 'done') { respEl.classList.remove('streaming'); }
+    });
+  } catch (err) {
+    respEl.textContent = 'Error: ' + err.message; respEl.classList.remove('streaming');
+  } finally {
+    _librarianStreaming = false; $('librarian-send').disabled = false;
+  }
+}
+$('librarian-send').addEventListener('click', sendLibrarian);
+$('librarian-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendLibrarian(); } });
+$('librarian-toggle').addEventListener('click', () => {
+  const card = $('librarian-toggle').closest('.librarian-card');
+  const collapsed = card.classList.toggle('collapsed');
+  $('librarian-toggle').setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+});
 
 function showApp() {
   $('login-page').classList.add('hidden');
   $('app').classList.remove('hidden');
   if (S.currentUser) $('sidebar-username').textContent = S.currentUser.username;
+  loadLibrarian();
 }
 
 async function checkAuth() {
@@ -1945,7 +2034,7 @@ function reaffixReader(anchorStart) {            // keep reading spot after a re
   layoutReaderColumns();
   if (anchorStart != null) {
     const el = $('reader-page').querySelector(`.reader-sent[data-start="${anchorStart}"]`);
-    if (el) el.scrollIntoView({ inline: 'start', block: 'nearest' });
+    if (el) { readerScrollToEl(el, false); updateReaderArrows(); return; }
   }
   readerSnap(false); updateReaderArrows();
 }
@@ -1965,7 +2054,7 @@ async function readerPrevPage() {
     if (await readerLoadMore('back')) {
       renderReaderPage();
       const el = anchorStart != null ? $('reader-page').querySelector(`.reader-sent[data-start="${anchorStart}"]`) : null;
-      if (el) el.scrollIntoView({ inline: 'start', block: 'nearest' });
+      if (el) { readerScrollToEl(el, false); updateReaderArrows(); return; }
     }
   }
   s.scrollTo({ left: Math.max(0, Math.round(s.scrollLeft / READER.pitch) - 1) * READER.pitch, behavior: 'smooth' });
@@ -1984,11 +2073,12 @@ function onReaderScroll() {                       // swipe: auto-load at boundar
       if (await readerLoadMore('back')) {
         renderReaderPage();
         const el = anchorStart != null ? $('reader-page').querySelector(`.reader-sent[data-start="${anchorStart}"]`) : null;
-        if (el) el.scrollIntoView({ inline: 'start', block: 'nearest' });
+        if (el) { readerScrollToEl(el, false); updateReaderArrows(); saveReaderPos(); return; }
       }
     }
     readerSnap();
     updateReaderArrows();
+    saveReaderPos();
   }, 140);
 }
 
@@ -2002,15 +2092,38 @@ function highlightReaderActive() {
     el.classList.toggle('active', activeStart !== null && +el.dataset.start === activeStart));
 }
 
-// ── Reading ↔ playback sync (independent; connected on demand) ──
-function readerLocate(smooth = true) {            // jump the reading view to current playback
-  const t = audioEl.currentTime || 0;
+// Scroll so `el` sits at the start of a page (geometry-based — reliable for the
+// horizontal multi-column layout, unlike scrollIntoView).
+function readerScrollToEl(el, smooth = true) {
+  if (!el || !READER.pitch) return;
+  const s = $('reader-scroll');
+  const delta = el.getBoundingClientRect().left - s.getBoundingClientRect().left;
+  const target = Math.round((s.scrollLeft + delta) / READER.pitch) * READER.pitch;
+  s.scrollTo({ left: Math.max(0, target), behavior: smooth ? 'smooth' : 'auto' });
+}
+function readerElForTime(t) {
   let target = null;
   for (const s of READER.segs) { if (s.start <= t) target = s; else break; }
   const page = $('reader-page');
-  let el = target ? page.querySelector(`.reader-sent[data-start="${target.start}"]`) : null;
-  if (!el) el = page.querySelector('.reader-sent');
-  if (el) { el.scrollIntoView({ inline: 'start', block: 'nearest' }); readerSnap(smooth); }
+  return (target ? page.querySelector(`.reader-sent[data-start="${target.start}"]`) : null)
+         || page.querySelector('.reader-sent');
+}
+function readerSeekToTime(t, smooth = true) { readerScrollToEl(readerElForTime(t), smooth); }
+
+// ── Reading-position persistence (own spot, independent of playback) ──
+function readerSavedPos(bookId) {
+  const v = parseFloat(localStorage.getItem('reader_pos_' + bookId));
+  return isFinite(v) ? v : null;
+}
+function saveReaderPos() {
+  if (!READER.open || !S.book) return;
+  const el = readerFirstVisible();
+  if (el) localStorage.setItem('reader_pos_' + S.book.id, el.dataset.start);
+}
+
+// ── Reading ↔ playback sync (independent; connected on demand) ──
+function readerLocate(smooth = true) {            // jump the reading view to current playback
+  readerSeekToTime(audioEl.currentTime || 0, smooth);
   highlightReaderActive();
 }
 function readerPlayHere() {                        // play audio from the first sentence on this page
@@ -2030,11 +2143,19 @@ async function openReader() {
   $('reader-title').textContent = S.book.title || 'Reading';
   loadReaderPrefs();
   $('reader-mode').classList.remove('hidden');          // show first so clientWidth is correct
+  // Resume at our own saved reading spot; first time, start where playback is.
+  const saved = readerSavedPos(S.book.id);
+  const startT = saved != null ? saved : (audioEl.currentTime || 0);
   if (READER.bookId !== S.book.id || !READER.segs.length) {
-    await readerLoadInitial(audioEl.currentTime || 0);
+    await readerLoadInitial(startT);
   }
   renderReaderPage();
-  requestAnimationFrame(() => { readerLocate(false); updateReaderArrows(); });
+  // Jump after layout settles (two frames so the multi-column width is applied).
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    readerSeekToTime(startT, false);
+    highlightReaderActive();
+    updateReaderArrows();
+  }));
   updateReaderPlayIcon();
   updateReaderProgress();
 }
@@ -2071,10 +2192,29 @@ function renderRclTerms(terms) {
     `<span class="rcl-term"><b>${esc(t.term)}</b> — ${esc(t.meaning || '')}</span>`).join('');
   box.classList.remove('hidden');
 }
+// Open the reader chat sheet without clarifying a line — anchored to the page you're reading.
+function openReaderChat() {
+  if (!S.book) return;
+  const el = readerFirstVisible();
+  const startAttr = el ? el.dataset.start : null;
+  READER.clSeg = (startAttr != null ? READER.segs.find(s => String(s.start) === String(startAttr)) : null)
+                 || READER.segs[0] || null;
+  $('reader-cl-sheet').classList.add('chat-only');
+  $('reader-cl-bg').classList.remove('hidden');
+  $('rcl-original').textContent   = READER.clSeg ? READER.clSeg.text.trim() : '';
+  $('rcl-translated').textContent = '';
+  $('rcl-explanation').textContent = '';
+  renderRclTerms([]); setRclStatus('');
+  if (_rclChatBook !== S.book.id) { _rclChatBook = S.book.id; loadRclChat(); }
+  setTimeout(() => { const c = $('rcl-chat-messages'); c.scrollTop = c.scrollHeight; $('rcl-chat-input').focus(); }, 120);
+}
+
 async function openReaderClarify(seg) {
   if (READER.clarifying) return;
   READER.clSeg = seg;
+  $('reader-cl-sheet').classList.remove('chat-only');   // full clarify view
   $('reader-cl-bg').classList.remove('hidden');
+  $('reader-cl-sheet').scrollTop = 0;   // show translation/explanation first, not the chat
   if (_rclChatBook !== S.book.id) { _rclChatBook = S.book.id; loadRclChat(); }
   $('rcl-original').textContent   = seg.text.trim();
   $('rcl-translated').textContent = '';
@@ -2151,7 +2291,8 @@ async function sendRclChat() {
   let raw = '';
   try {
     await streamPost('/api/chat/stream',
-      { book_id: S.book.id, message: msg, position_sec: audioEl.currentTime },
+      { book_id: S.book.id, message: msg,
+        position_sec: READER.clSeg ? (READER.clSeg.start + READER.clSeg.end) / 2 : audioEl.currentTime },
       (ev) => {
         if (ev.type === 'token') { raw += ev.text; respEl.innerHTML = renderMarkdown(raw); const c = $('rcl-chat-messages'); c.scrollTop = c.scrollHeight; }
         else if (ev.type === 'done') { respEl.classList.remove('streaming'); }
@@ -2180,6 +2321,7 @@ function updateReaderProgress() {
 $('pf-read-btn').addEventListener('click', openReader);
 $('reader-back').addEventListener('click', closeReader);
 $('reader-aa').addEventListener('click', () => $('reader-ctrl-bg').classList.remove('hidden'));
+$('reader-chat-btn').addEventListener('click', openReaderChat);
 $('reader-play').addEventListener('click', () => { audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause(); });
 $('reader-prev-page').addEventListener('click', readerPrevPage);
 $('reader-next-page').addEventListener('click', readerNextPage);

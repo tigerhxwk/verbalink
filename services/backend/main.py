@@ -2004,6 +2004,7 @@ async def last_essay_position(book_id: str, user: dict = Depends(current_user)):
 class EssayPromptRequest(BaseModel):
     book_id:      str
     position_sec: float
+    ranges:       Optional[list] = None   # [{"start":..,"end":..}] actually-listened intervals
 
 
 @app.post("/api/essay/prompt")
@@ -2018,22 +2019,30 @@ async def generate_essay_prompt(req: EssayPromptRequest, user: dict = Depends(cu
     if not row:
         raise HTTPException(404)
 
-    # Get last ~30 minutes of segments as context (partial transcript is fine)
     segments, _ = _read_transcript(req.book_id)
     if not segments:
         raise HTTPException(400, "Transcript not ready")
-    window_start = max(0, req.position_sec - 1800)  # last 30 min
-    passage_segs = [s for s in segments if window_start <= s["end"] <= req.position_sec]
+    # Prefer the exact intervals the student actually listened to (may be scattered across
+    # the book); fall back to "last ~30 min up to position" for older callers.
+    ranges = [r for r in (req.ranges or []) if isinstance(r, dict) and "start" in r and "end" in r]
+    if ranges:
+        passage_segs = [s for s in segments
+                        if any(s["start"] < r["end"] and s["end"] > r["start"] for r in ranges)]
+    else:
+        window_start = max(0, req.position_sec - 1800)
+        passage_segs = [s for s in segments if window_start <= s["end"] <= req.position_sec]
     if not passage_segs:
         raise HTTPException(400, "No passage found at this position")
-    passage = " ".join(s["text"].strip() for s in passage_segs[-80:])  # last 80 segments
+    passage = " ".join(s["text"].strip() for s in passage_segs[-120:])  # cap context size
 
     src = LANG_NAMES.get(row["source_lang"], row["source_lang"])
     tgt = LANG_NAMES.get(row["target_lang"], row["target_lang"])
     prompt = (
-        f'Audiobook: "{row["title"]}" ({src})\n\nPassage:\n{passage[:3000]}\n\n'
-        f"Write a short essay task in {tgt} for a language student who just listened to this passage. "
-        f"The task should test comprehension and encourage using vocabulary from the passage. "
+        f'Audiobook: "{row["title"]}" ({src})\n\n'
+        f"The student listened to the following material (it may span a few different parts of the book):\n"
+        f"{passage[:3000]}\n\n"
+        f"Write a short essay task in {tgt} for a language student who just listened to this material. "
+        f"The task should test comprehension of what they heard and encourage using its vocabulary. "
         f"Target length: 300-500 characters. "
         f"Output ONLY the task text, nothing else."
     )

@@ -10,6 +10,8 @@ const S = {
   transcript: [],
   activeIdx: -1,
   maxReadSec: 0,         // furthest point actually listened to — anchors the spoiler blur
+  listenedTotal: 0,      // cumulative seconds actually heard (scrubbing doesn't count)
+  essayRanges: [],       // [{start,end}] actually-heard intervals since the last essay
   seeking: false,
   playerOpen: false,
   clarifying: false,
@@ -81,14 +83,35 @@ function renderMarkdown(src) {
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
 
+  const splitRow = (line) => line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+  const isTableSep = (line) => line.includes('|') && /^[\s:|-]+$/.test(line) && line.includes('-');
+
   const lines = String(src).split('\n');
   let html = '', list = null;  // list = 'ul' | 'ol' | null
   const closeList = () => { if (list) { html += `</${list}>`; list = null; } };
 
-  for (const raw of lines) {
-    const line = raw.trim();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
     let m;
-    if ((m = line.match(/^[-*]\s+(.*)$/))) {
+    // GFM table: a "| … |" header row immediately followed by a "| --- | --- |" separator
+    if (line.startsWith('|') && i + 1 < lines.length && isTableSep(lines[i + 1].trim())) {
+      closeList();
+      const header = splitRow(line);
+      let body = '';
+      i += 2;  // consume header + separator
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        const cells = splitRow(lines[i].trim());
+        body += '<tr>' + cells.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>';
+        i++;
+      }
+      i--;  // the for-loop will advance past the last consumed row
+      html += '<table class="md-table"><thead><tr>'
+            + header.map(h => `<th>${inline(h)}</th>`).join('')
+            + '</tr></thead><tbody>' + body + '</tbody></table>';
+    } else if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      closeList();
+      html += `<div class="md-h md-h${m[1].length}">${inline(m[2])}</div>`;
+    } else if ((m = line.match(/^[-*]\s+(.*)$/))) {
       if (list !== 'ul') { closeList(); html += '<ul>'; list = 'ul'; }
       html += `<li>${inline(m[1])}</li>`;
     } else if ((m = line.match(/^\d+\.\s+(.*)$/))) {
@@ -721,12 +744,15 @@ async function openBook(book, collId = null, autoplay = false) {
   miniPlayer.classList.remove('hidden');
   openFullPlayer();
   _essayNotifShown = false;
-  loadLastEssayPos(book.id).catch(() => {});
+  // Reset per-book listening trackers (session-scoped)
+  S.listenedTotal = 0; S.essayRanges = []; _lastEssayListened = 0; _lastTickT = null;
 
   // Load the initial transcript window around the saved position
   ensureWindow(savedPos(book.id) || 0, true);
   loadChapters(book.id);
   loadChatHistory(book.id);
+  showChatFab();           // floating chat becomes available for this book (starts collapsed)
+  collapseChat();
 
   // Load playlist when opened from a collection
   if (collId) {
@@ -794,7 +820,7 @@ audioEl.addEventListener('timeupdate', () => {
   $('seek-bar').value           = t;
   $('time-cur').textContent     = fmt(t);
   $('mini-seek-fill').style.width = (t / dur * 100).toFixed(2) + '%';
-  if (!audioEl.paused) S.maxReadSec = Math.max(S.maxReadSec || 0, t);  // advance only while actually playing
+  if (!audioEl.paused) { S.maxReadSec = Math.max(S.maxReadSec || 0, t); noteListenTick(t); }  // only while actually playing
   updateActive(t);
   ensureWindow(t);  // slide the transcript window as playback advances
   if (S.book) { savePos(S.book.id, t); saveBookSettings({ progress_sec: t }); }
@@ -804,6 +830,7 @@ audioEl.addEventListener('timeupdate', () => {
 // then resync the karaoke highlight + blur to the new position.
 audioEl.addEventListener('seeked', async () => {
   if (!S.book) return;
+  _lastTickT = null;          // break listening contiguity — a jump isn't "listened to"
   const t = audioEl.currentTime;
   const outside = !(t >= WIN.lo && t <= WIN.hi);   // force a refetch if we left the window
   await ensureWindow(t, outside);
@@ -816,7 +843,7 @@ const MINI_PLAY  = `<svg width="18" height="18" viewBox="0 0 24 24" fill="curren
 const MINI_PAUSE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
 
 audioEl.addEventListener('play',  () => { stopTts(); $('play-btn').innerHTML = PAUSE_SVG; $('mini-play-btn').innerHTML = MINI_PAUSE; });
-audioEl.addEventListener('pause', () => { $('play-btn').innerHTML = PLAY_SVG;  $('mini-play-btn').innerHTML = MINI_PLAY; });
+audioEl.addEventListener('pause', () => { $('play-btn').innerHTML = PLAY_SVG;  $('mini-play-btn').innerHTML = MINI_PLAY; _lastTickT = null; });
 
 // ── Playback controls ─────────────────────────────────────────────────────────
 $('play-btn').addEventListener('click',    () => { clearAutoResume(); audioEl.paused ? audioEl.play() : audioEl.pause(); });
@@ -1078,17 +1105,7 @@ function hideRightPanel() {
 }
 
 // ── Clarify ───────────────────────────────────────────────────────────────────
-function openClPanel() { $('pf-clarify-panel').classList.remove('chat-only'); showRightPanel('clarify'); }
-
-// Open the clarify panel as chat-only (the "Ask" button) — no line clarified,
-// chat anchored to the current playback passage. Works desktop + mobile.
-function openPlayerChat() {
-  if (!S.book) return;
-  _clarifyPos = audioEl.currentTime;
-  $('pf-clarify-panel').classList.add('chat-only');
-  showRightPanel('clarify');
-  setTimeout(() => { scrollChatDown(); $('cl-chat-input').focus(); }, 100);
-}
+function openClPanel() { showRightPanel('clarify'); }
 
 function closeClPanel() {
   stopTts();
@@ -1395,7 +1412,7 @@ function setClStatus(msg, dot = false) {
 
 $('clarify-btn').addEventListener('click', runClarify);
 $('mini-clarify-btn').addEventListener('click', runClarify);
-$('pf-chat-btn').addEventListener('click', openPlayerChat);
+$('pf-chat-btn').addEventListener('click', expandChat);
 
 $('cl-resume-btn').addEventListener('click', () => {
   clearAutoResume();
@@ -1410,10 +1427,7 @@ let _chatStreaming = false;
 
 function scrollChatDown() {
   const msgs = $('cl-chat-messages');
-  msgs.scrollTop = msgs.scrollHeight;
-  // Also scroll the whole clarify panel so the input row stays in view
-  const panel = $('pf-clarify-panel');
-  panel.scrollTop = panel.scrollHeight;
+  if (msgs) msgs.scrollTop = msgs.scrollHeight;
 }
 
 function appendChatMsg(role, text, streaming = false) {
@@ -1451,8 +1465,7 @@ async function sendChat() {
 
   try {
     await streamPost('/api/chat/stream',
-      { book_id: S.book.id, message: msg,
-        position_sec: _clarifyPos != null ? _clarifyPos : audioEl.currentTime },
+      { book_id: S.book.id, message: msg, position_sec: currentChatPos() },
       (ev) => {
         if (ev.type === 'token') {
           raw += ev.text;
@@ -1475,6 +1488,27 @@ async function sendChat() {
 $('cl-chat-send').addEventListener('click', sendChat);
 $('cl-chat-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
 $('cl-chat-input').addEventListener('focus', () => setTimeout(scrollChatDown, 300));  // after mobile keyboard opens
+
+// ── Floating book chat (collapsible; decoupled from clarify) ──
+// Anchor the chat's passage context to whatever the user is looking at right now.
+function currentChatPos() {
+  if (READER.open) {
+    const el = readerFirstVisible();
+    if (el) return parseFloat(el.dataset.start) || 0;
+  }
+  if (_clarifyIsOpen() && _clarifyPos != null) return _clarifyPos;
+  return audioEl.currentTime || 0;
+}
+function showChatFab() { if (S.book) $('chat-float').classList.remove('hidden'); }
+function hideChatFab() { $('chat-float').classList.add('hidden', 'collapsed'); }
+function expandChat() {
+  if (!S.book) return;
+  $('chat-float').classList.remove('hidden', 'collapsed');
+  setTimeout(() => { scrollChatDown(); $('cl-chat-input').focus(); }, 80);
+}
+function collapseChat() { $('chat-float').classList.add('collapsed'); }
+$('chat-fab').addEventListener('click', expandChat);
+$('chat-float-min').addEventListener('click', collapseChat);
 
 // ── Playlist ──────────────────────────────────────────────────────────────────
 function renderPlaylist() {
@@ -1558,6 +1592,7 @@ function showLogin() {
   const btn = $('login-submit-btn');
   if (btn) { btn.disabled = false; btn.textContent = 'Check in'; }
   _librarianLoaded = false;   // next user reloads their own librarian history
+  hideChatFab();
 }
 
 // ── Librarian (main-page RAG chat over the user's whole library) ──
@@ -1725,22 +1760,39 @@ document.querySelectorAll('[data-action="settings"]').forEach(b =>
 );
 
 // ── Essay trigger ─────────────────────────────────────────────────────────────
-let _lastEssayPos = 0;
 let _essayNotifShown = false;
+let _lastEssayListened = 0;   // S.listenedTotal at the last essay (trigger baseline)
+let _lastTickT = null;        // previous timeupdate position, to measure contiguous listening
 
-async function loadLastEssayPos(bookId) {
-  try {
-    const r = await api('GET', `/api/books/${bookId}/essays/last-position`);
-    _lastEssayPos = r.position_sec || 0;
-  } catch {
-    _lastEssayPos = 0;
+// Merge [start,end] into a sorted, coalesced interval list (gaps ≤1s are joined).
+function _mergeRange(arr, start, end) {
+  arr.push({ start, end });
+  arr.sort((a, b) => a.start - b.start);
+  const out = [];
+  for (const r of arr) {
+    const last = out[out.length - 1];
+    if (last && r.start <= last.end + 1) last.end = Math.max(last.end, r.end);
+    else out.push({ start: r.start, end: r.end });
   }
+  arr.length = 0; arr.push(...out);
 }
 
-function checkEssayTrigger(currentTime) {
+// Called on each playing timeupdate: count only *contiguous* progress as listened,
+// so a scrub (which breaks contiguity via _lastTickT reset) never inflates the total.
+function noteListenTick(t) {
+  if (_lastTickT != null && t > _lastTickT && t - _lastTickT < 2) {
+    S.listenedTotal += (t - _lastTickT);
+    _mergeRange(S.essayRanges, _lastTickT, t);
+  }
+  _lastTickT = t;
+}
+
+function checkEssayTrigger() {
   if (!S.book || !_userSettings.essay_enabled || _essayNotifShown) return;
   const interval = (_userSettings.essay_interval_min || 30) * 60;
-  if (currentTime - _lastEssayPos >= interval) {
+  // Trigger after the user has ACTUALLY listened to `interval` seconds of new content
+  // (sum of real playback), regardless of where in the book those minutes came from.
+  if ((S.listenedTotal - _lastEssayListened) >= interval) {
     _essayNotifShown = true;
     showEssayNotification();
   }
@@ -1754,7 +1806,8 @@ function showEssayNotification() {
 
 $('essay-notif-dismiss').addEventListener('click', () => {
   $('essay-notification').classList.add('hidden');
-  _lastEssayPos = audioEl.currentTime;  // reset trigger from current position
+  _lastEssayListened = S.listenedTotal;   // wait another full interval of listening
+  S.essayRanges = [];
   _essayNotifShown = false;
 });
 
@@ -1782,11 +1835,13 @@ async function openEssayPanel() {
 
   try {
     const r = await api('POST', '/api/essay/prompt',
-      { book_id: S.book.id, position_sec: audioEl.currentTime });
+      { book_id: S.book.id, position_sec: audioEl.currentTime,
+        ranges: S.essayRanges.map(x => ({ start: x.start, end: x.end })) });  // exact heard passages
     _currentEssayId = r.essay_id;
     $('essay-prompt-text').textContent = r.prompt;
     $('essay-submit-btn').disabled = false;
-    _lastEssayPos = audioEl.currentTime;
+    _lastEssayListened = S.listenedTotal;   // next essay after another interval of listening
+    S.essayRanges = [];
     _essayNotifShown = false;
   } catch (err) {
     $('essay-prompt-text').textContent = 'Could not generate prompt: ' + err.message;
@@ -1886,10 +1941,9 @@ $('essay-voice-btn').addEventListener('click', async () => {
   }
 });
 
-// Hook essay trigger into timeupdate
-const _origTimeUpdate = audioEl.ontimeupdate;
+// Hook essay trigger into timeupdate (gates on listened time, not scrub position)
 audioEl.addEventListener('timeupdate', () => {
-  if (!S.seeking) checkEssayTrigger(audioEl.currentTime);
+  if (!S.seeking) checkEssayTrigger();
 });
 
 // ── Theme ───────────────────────────────────────────────────────────────────────
@@ -2191,6 +2245,8 @@ async function openReader() {
   $('reader-title').textContent = S.book.title || 'Reading';
   loadReaderPrefs();
   $('reader-mode').classList.remove('hidden');          // show first so clientWidth is correct
+  $('chat-float').classList.add('in-reader');           // reader uses its own chat button (hide FAB)
+  collapseChat();
   // Resume at our own saved reading spot; first time, start where playback is.
   const saved = readerSavedPos(S.book.id);
   const startT = saved != null ? saved : (audioEl.currentTime || 0);
@@ -2212,6 +2268,7 @@ function closeReader() {
   $('reader-mode').classList.add('hidden');
   $('reader-cl-bg').classList.add('hidden');
   $('reader-ctrl-bg').classList.add('hidden');
+  $('chat-float').classList.remove('in-reader');
 }
 
 // ── Reading controls (persist to account) ──
@@ -2240,30 +2297,12 @@ function renderRclTerms(terms) {
     `<span class="rcl-term"><b>${esc(t.term)}</b> — ${esc(t.meaning || '')}</span>`).join('');
   box.classList.remove('hidden');
 }
-// Open the reader chat sheet without clarifying a line — anchored to the page you're reading.
-function openReaderChat() {
-  if (!S.book) return;
-  const el = readerFirstVisible();
-  const startAttr = el ? el.dataset.start : null;
-  READER.clSeg = (startAttr != null ? READER.segs.find(s => String(s.start) === String(startAttr)) : null)
-                 || READER.segs[0] || null;
-  $('reader-cl-sheet').classList.add('chat-only');
-  $('reader-cl-bg').classList.remove('hidden');
-  $('rcl-original').textContent   = READER.clSeg ? READER.clSeg.text.trim() : '';
-  $('rcl-translated').textContent = '';
-  $('rcl-explanation').textContent = '';
-  renderRclTerms([]); setRclStatus('');
-  if (_rclChatBook !== S.book.id) { _rclChatBook = S.book.id; loadRclChat(); }
-  setTimeout(() => { const c = $('rcl-chat-messages'); c.scrollTop = c.scrollHeight; $('rcl-chat-input').focus(); }, 120);
-}
 
 async function openReaderClarify(seg) {
   if (READER.clarifying) return;
   READER.clSeg = seg;
-  $('reader-cl-sheet').classList.remove('chat-only');   // full clarify view
   $('reader-cl-bg').classList.remove('hidden');
-  $('reader-cl-sheet').scrollTop = 0;   // show translation/explanation first, not the chat
-  if (_rclChatBook !== S.book.id) { _rclChatBook = S.book.id; loadRclChat(); }
+  $('reader-cl-sheet').scrollTop = 0;
   $('rcl-original').textContent   = seg.text.trim();
   $('rcl-translated').textContent = '';
   $('rcl-explanation').textContent = '';
@@ -2309,48 +2348,6 @@ function playReaderLine() {
   updateReaderPlayIcon();
 }
 
-// ── Reader sheet chat (book-scoped; mirrors the desktop dialogue) ──
-let _rclChatBook = null;
-let _rclChatStreaming = false;
-function appendRclChat(role, text, streaming = false) {
-  const el = document.createElement('div');
-  el.className = `cl-chat-msg ${role}${streaming ? ' streaming' : ''}`;
-  if (role === 'assistant') el.innerHTML = renderMarkdown(text); else el.textContent = text;
-  const cont = $('rcl-chat-messages');
-  cont.appendChild(el);
-  cont.scrollTop = cont.scrollHeight;
-  return el;
-}
-async function loadRclChat() {
-  const cont = $('rcl-chat-messages');
-  cont.innerHTML = '';
-  try { const d = await api('GET', `/api/chat/${S.book.id}`); (d.messages || []).forEach(m => appendRclChat(m.role, m.content)); } catch {}
-}
-async function sendRclChat() {
-  if (_rclChatStreaming || !S.book) return;
-  const input = $('rcl-chat-input');
-  const msg = input.value.trim();
-  if (!msg) return;
-  input.value = '';
-  _rclChatStreaming = true;
-  $('rcl-chat-send').disabled = true;
-  appendRclChat('user', msg);
-  const respEl = appendRclChat('assistant', '', true);
-  let raw = '';
-  try {
-    await streamPost('/api/chat/stream',
-      { book_id: S.book.id, message: msg,
-        position_sec: READER.clSeg ? (READER.clSeg.start + READER.clSeg.end) / 2 : audioEl.currentTime },
-      (ev) => {
-        if (ev.type === 'token') { raw += ev.text; respEl.innerHTML = renderMarkdown(raw); const c = $('rcl-chat-messages'); c.scrollTop = c.scrollHeight; }
-        else if (ev.type === 'done') { respEl.classList.remove('streaming'); }
-      });
-  } catch (err) {
-    respEl.textContent = 'Error: ' + err.message; respEl.classList.remove('streaming');
-  } finally {
-    _rclChatStreaming = false; $('rcl-chat-send').disabled = false;
-  }
-}
 
 // ── Reader playback bar ──
 function updateReaderPlayIcon() {
@@ -2369,7 +2366,7 @@ function updateReaderProgress() {
 $('pf-read-btn').addEventListener('click', openReader);
 $('reader-back').addEventListener('click', closeReader);
 $('reader-aa').addEventListener('click', () => $('reader-ctrl-bg').classList.remove('hidden'));
-$('reader-chat-btn').addEventListener('click', openReaderChat);
+$('reader-chat-btn').addEventListener('click', expandChat);
 $('reader-play').addEventListener('click', () => { audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause(); });
 $('reader-prev-page').addEventListener('click', readerPrevPage);
 $('reader-next-page').addEventListener('click', readerNextPage);
@@ -2387,9 +2384,6 @@ $('rc-line-inc').addEventListener('click', () => setReaderLine(+0.1));
 $('rc-bright').addEventListener('input', (e) => setReaderBright(+e.target.value));
 $('rcl-play').addEventListener('click', playReaderLine);
 $('rcl-close').addEventListener('click', () => $('reader-cl-bg').classList.add('hidden'));
-$('rcl-chat-send').addEventListener('click', sendRclChat);
-$('rcl-chat-input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRclChat(); } });
-$('rcl-chat-input').addEventListener('focus', () => setTimeout(() => { const c = $('rcl-chat-messages'); c.scrollTop = c.scrollHeight; }, 300));
 // Reader mode (Beginner/Advanced) buttons re-run the current clarify in the new mode
 document.querySelectorAll('#reader-cl-sheet .cl-mode-btn').forEach(b =>
   b.addEventListener('click', () => { if (READER.clSeg && !READER.clarifying) openReaderClarify(READER.clSeg); }));

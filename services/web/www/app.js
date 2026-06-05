@@ -9,6 +9,7 @@ const S = {
   book: null,
   transcript: [],
   activeIdx: -1,
+  maxReadSec: 0,         // furthest point actually listened to — anchors the spoiler blur
   seeking: false,
   playerOpen: false,
   clarifying: false,
@@ -618,7 +619,7 @@ async function ensureWindow(t, force = false) {
     WIN.hasPrev = data.has_prev; WIN.hasNext = data.has_next; WIN.bookId = S.book.id;
     S.activeIdx = -1;
     renderTranscriptScroller();
-    updateActive(audioEl.currentTime);
+    updateActive(t);   // highlight the position we centred on (playback OR scrub target)
   } catch {
     // transcript not ready yet — leave window empty, will retry on next tick
   } finally {
@@ -707,11 +708,14 @@ async function openBook(book, collId = null, autoplay = false) {
     $('pf-tgt-sel').value = s.target_lang || book.target_lang || 'en';
     // Progress
     const prog = s.progress_sec || savedPos(book.id) || 0;
+    S.maxReadSec = prog;          // everything up to the resume point is already "read"
     _startAudio(book.id, prog, autoplay);
   } catch {
     // Fallback to localStorage
     $('pf-tgt-sel').value = book.target_lang || 'en';
-    _startAudio(book.id, savedPos(book.id) || 0, autoplay);
+    const prog = savedPos(book.id) || 0;
+    S.maxReadSec = prog;
+    _startAudio(book.id, prog, autoplay);
   }
 
   miniPlayer.classList.remove('hidden');
@@ -790,13 +794,21 @@ audioEl.addEventListener('timeupdate', () => {
   $('seek-bar').value           = t;
   $('time-cur').textContent     = fmt(t);
   $('mini-seek-fill').style.width = (t / dur * 100).toFixed(2) + '%';
+  if (!audioEl.paused) S.maxReadSec = Math.max(S.maxReadSec || 0, t);  // advance only while actually playing
   updateActive(t);
   ensureWindow(t);  // slide the transcript window as playback advances
   if (S.book) { savePos(S.book.id, t); saveBookSettings({ progress_sec: t }); }
 });
 
-// Refetch the window after a seek (user may have jumped far from the loaded range)
-audioEl.addEventListener('seeked', () => { if (S.book) ensureWindow(audioEl.currentTime); });
+// Refetch the window after a seek (user may have jumped far from the loaded range),
+// then resync the karaoke highlight + blur to the new position.
+audioEl.addEventListener('seeked', async () => {
+  if (!S.book) return;
+  const t = audioEl.currentTime;
+  const outside = !(t >= WIN.lo && t <= WIN.hi);   // force a refetch if we left the window
+  await ensureWindow(t, outside);
+  updateActive(t);
+});
 
 const PLAY_SVG  = `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>`;
 const PAUSE_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
@@ -813,8 +825,23 @@ $('rewind-btn').addEventListener('click',  () => { audioEl.currentTime = Math.ma
 $('forward-btn').addEventListener('click', () => { audioEl.currentTime = Math.min(audioEl.duration || 0, audioEl.currentTime + 15); });
 
 $('seek-bar').addEventListener('mousedown', () => { S.seeking = true; });
-$('seek-bar').addEventListener('input',     () => { $('time-cur').textContent = fmt(+$('seek-bar').value); });
-$('seek-bar').addEventListener('change',    () => { audioEl.currentTime = +$('seek-bar').value; S.seeking = false; });
+$('seek-bar').addEventListener('touchstart', () => { S.seeking = true; }, { passive: true });
+let _seekFetchT = 0;
+$('seek-bar').addEventListener('input', () => {
+  const v = +$('seek-bar').value;
+  $('time-cur').textContent = fmt(v);
+  updateActive(v);            // karaoke highlight + blur follow the pin while scrubbing
+  // If scrubbing into unloaded territory, fetch that region (throttled) so text follows
+  if (!(v >= WIN.lo && v <= WIN.hi) && Date.now() - _seekFetchT > 250) {
+    _seekFetchT = Date.now();
+    ensureWindow(v, true);
+  }
+});
+$('seek-bar').addEventListener('change', () => {
+  const v = +$('seek-bar').value;
+  audioEl.currentTime = v;    // fires 'seeked', which refetches + resyncs the highlight
+  S.seeking = false;
+});
 
 $('speed-bar').addEventListener('input', () => {
   const v = parseFloat($('speed-bar').value);
@@ -935,13 +962,24 @@ function renderTranscriptScroller() {
   highlightTranscript(S.activeIdx);
 }
 
+// Index of the last sentence actually listened to (high-water mark) — anchors the spoiler
+// blur so it remembers your furthest-read point instead of following the scrub pin backward.
+function _readBoundaryIdx() {
+  const segs = S.transcript || [];
+  const mr = S.maxReadSec || 0;
+  let r = -1;
+  for (let i = 0; i < segs.length; i++) { if (segs[i].start <= mr) r = i; else break; }
+  return r;
+}
+
 function highlightTranscript(idx) {
   const scroll = $('transcript-scroll');
   if (!scroll || _transcriptCollapsed) return;
+  const readIdx = _readBoundaryIdx();
   scroll.querySelectorAll('.tr-line').forEach(el => {
     const i = +el.dataset.i;
-    el.classList.toggle('active', i === idx);
-    el.classList.toggle('unread', idx >= 0 && i > idx);  // everything after current = upcoming
+    el.classList.toggle('active', i === idx);     // highlight follows playback / scrub pin
+    el.classList.toggle('unread', i > readIdx);   // blur everything past furthest-read; -1 ⇒ blur all
   });
   const row = scroll.querySelector(`.tr-line[data-i="${idx}"]`);
   if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1013,7 +1051,7 @@ function saveUserSetting(patch) {
 
 // Clarify a specific sentence object (used by the scroller rows)
 function analyzeSentenceFor(seg) {
-  _resumeAfterClarify = !audioEl.paused;
+  if (!_clarifyIsOpen()) _resumeAfterClarify = !audioEl.paused;   // only on fresh entry
   audioEl.pause();
   openClPanel();
   $('cl-original').textContent = '';
@@ -1253,9 +1291,17 @@ function buildSentencePicker() {
 let _resumeAfterClarify = false;   // only auto-continue if audio was playing when clarify began
 let _clarifyPos = null;            // position of the clarified sentence (for chat passage context)
 
+// True when the clarify panel is already on screen (so we're switching sentences, not entering fresh).
+function _clarifyIsOpen() {
+  return !$('pf-right-panel').classList.contains('hidden')
+      && !$('pf-clarify-panel').classList.contains('hidden');
+}
+
 function runClarify() {
   if (!S.book) return;
-  _resumeAfterClarify = !audioEl.paused;
+  // Capture "was playing" only on fresh entry — a prior clarify already paused the audio,
+  // so re-reading audioEl.paused here would wrongly latch false.
+  if (!_clarifyIsOpen()) _resumeAfterClarify = !audioEl.paused;
   audioEl.pause();
   clearAutoResume();
   openClPanel();

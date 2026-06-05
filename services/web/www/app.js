@@ -453,6 +453,7 @@ function triggerUpload(file, collId = null) {
   S.pendingFile = file;
   S.pendingCollId = collId;
   $('modal-filename').textContent = file.name;
+  $('upload-share').checked = false;   // sharing is opt-in, default off, every upload
 
   // Populate collection dropdown
   const collSel = $('upload-coll-sel');
@@ -504,12 +505,13 @@ $('lang-confirm-btn').addEventListener('click', async () => {
   if (!file) return;
 
   const src = $('src-lang-sel').value;
+  const share = $('upload-share').checked;
   // Target language is chosen per-book in the player; default to last-used (or 'en').
   const tgt = localStorage.getItem('default_target_lang') || 'en';
   const fd  = new FormData();
   fd.append('file', file);
 
-  let url = `/api/books?source_lang=${src}&target_lang=${tgt}`;
+  let url = `/api/books?source_lang=${src}&target_lang=${tgt}&share=${share}`;
   if (collId) url += `&collection_id=${collId}`;
 
   const toast = $('upload-toast'), fill = $('toast-fill'), label = $('toast-label');

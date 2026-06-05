@@ -2437,6 +2437,11 @@ select:focus { border-color: var(--blue); }
 .librarian-body { padding: 0 18px 16px; }
 .librarian-messages { max-height: 340px; min-height: 56px; overflow-y: auto; margin-bottom: 12px; }
 
+/* Upload "share to community" consent row */
+.modal-share-row { align-items: flex-start; }
+.modal-share-label { display: flex; flex-direction: column; gap: 3px; max-width: 78%; }
+.modal-share-hint { font-size: 12px; color: var(--text-3); line-height: 1.4; font-weight: 400; }
+
 /* Reader entry button visible at all sizes; reading mode itself is the mobile experience */
 #pf-read-btn svg { color: var(--text-2); }
 

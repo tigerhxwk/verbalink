@@ -1636,16 +1636,18 @@ async def clarify_stream(req: ClarifyStreamRequest, user: dict = Depends(current
     # The whole explanation MUST be in the target language (what the learner reads in).
     if req.mode == "beginner":
         expl_prompt = (
-            f"You are a {src} tutor. Write your ENTIRE response in {tgt} and ONLY {tgt} — "
-            f"every single word in {tgt}, no other language.\n\n"
+            f"You are a {src} tutor teaching a {tgt}-speaking beginner. Write your ENTIRE response in {tgt} "
+            f"and ONLY {tgt} — every single word in {tgt}, no other language (except the {src} words you are quoting).\n\n"
             f'{ctx_line}'
-            f'{src} sentence to explain: "{original}"\n'
-            f'{tgt} translation: "{translation}"\n\n'
-            f"Explain ONLY the sentence above (the context is just to help you understand it), for a complete beginner, covering:\n"
-            f"1. Word-by-word: each key word's part of speech (noun, verb, adjective, article, preposition) and meaning.\n"
-            f"2. Grammar: tense, case, word order, and any constructions.\n"
-            f"3. The overall meaning in plain language.\n"
-            f"Plain text, no markdown headers. Remember: respond only in {tgt}."
+            f'{src} sentence to analyse: "{original}"\n'
+            f'(Its {tgt} translation, FOR YOUR REFERENCE ONLY — do NOT analyse this one: "{translation}")\n\n'
+            f"Break down the {src} ORIGINAL sentence above for a complete beginner. Analyse the {src} words and "
+            f"{src} grammar — NOT the translation. Cover:\n"
+            f"1. Word-by-word: for each key {src} word, quote the {src} word, then give its part of speech and its "
+            f"meaning explained in {tgt}.\n"
+            f"2. Grammar of the {src} sentence: tense, case, word order, and any constructions.\n"
+            f"3. The overall meaning, in plain {tgt}.\n"
+            f"Plain text, no markdown headers. Remember: explain the {src} original; respond in {tgt}."
         )
     else:
         expl_prompt = (

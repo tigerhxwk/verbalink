@@ -1014,7 +1014,11 @@ function _readBoundaryIdx() {
 
 function highlightTranscript(idx) {
   const scroll = $('transcript-scroll');
-  if (!scroll || _transcriptCollapsed) return;
+  // Skip when the transcript isn't actually visible (works for both the desktop
+  // collapsed state and the mobile sheet, where _transcriptCollapsed doesn't apply).
+  if (!scroll
+      || $('pf-right-panel').classList.contains('hidden')
+      || $('pf-transcript-view').classList.contains('hidden')) return;
   const readIdx = _readBoundaryIdx();
   scroll.querySelectorAll('.tr-line').forEach(el => {
     const i = +el.dataset.i;
@@ -1055,7 +1059,10 @@ function setTranscriptCollapsed(collapsed) {
 }
 
 // In-panel chevron hides the panel (centers controls)
-$('transcript-toggle-btn').addEventListener('click', () => setTranscriptCollapsed(true));
+$('transcript-toggle-btn').addEventListener('click', () => {
+  if (window.matchMedia('(max-width: 760px)').matches) { hideRightPanel(); return; }  // mobile sheet
+  setTranscriptCollapsed(true);
+});
 // Header button toggles the transcript panel on/off
 $('pf-transcript-btn').addEventListener('click', () => {
   if (window.matchMedia('(max-width: 760px)').matches) {

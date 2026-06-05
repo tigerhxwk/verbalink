@@ -2392,6 +2392,14 @@ select:focus { border-color: var(--blue); }
 .rcl-term b { color: var(--amber); font-weight: 600; }
 .rcl-explanation { font-family: var(--f-ui); font-size: 15px; line-height: 1.6; color: var(--text-2); white-space: pre-wrap; }
 .rcl-status { font-family: var(--f-ui); font-size: 13px; color: var(--text-3); margin-top: 12px; min-height: 16px; display: flex; align-items: center; gap: 7px; }
+
+/* Collapsed clarify sheet: keep just the header bar (pills + Play), let the page show through */
+.rcl-collapse svg { transition: transform var(--t-fast); }
+.reader-cl-sheet.collapsed .rcl-collapse svg { transform: rotate(180deg); }   /* chevron up = expand */
+.reader-cl-sheet.collapsed .rcl-mode,
+.reader-cl-sheet.collapsed .rcl-body { display: none; }
+#reader-cl-bg.sheet-collapsed { background: transparent; pointer-events: none; }   /* don't block reading */
+#reader-cl-bg.sheet-collapsed .reader-sheet { pointer-events: auto; }
 /* Desktop/player clarify panel opened as chat-only (the "Ask" button) */
 #pf-clarify-panel.chat-only .cl-langs,
 #pf-clarify-panel.chat-only .cl-mode-row,

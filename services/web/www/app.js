@@ -2330,7 +2330,8 @@ function renderRclTerms(terms) {
 async function openReaderClarify(seg) {
   if (READER.clarifying) return;
   READER.clSeg = seg;
-  $('reader-cl-bg').classList.remove('hidden');
+  $('reader-cl-bg').classList.remove('hidden', 'sheet-collapsed');   // always open expanded
+  $('reader-cl-sheet').classList.remove('collapsed');
   $('reader-cl-sheet').scrollTop = 0;
   $('rcl-original').textContent   = seg.text.trim();
   $('rcl-translated').textContent = '';
@@ -2413,7 +2414,15 @@ $('rc-line-dec').addEventListener('click', () => setReaderLine(-0.1));
 $('rc-line-inc').addEventListener('click', () => setReaderLine(+0.1));
 $('rc-bright').addEventListener('input', (e) => setReaderBright(+e.target.value));
 $('rcl-play').addEventListener('click', playReaderLine);
-$('rcl-close').addEventListener('click', () => $('reader-cl-bg').classList.add('hidden'));
+$('rcl-collapse').addEventListener('click', () => {
+  const collapsed = $('reader-cl-sheet').classList.toggle('collapsed');
+  $('reader-cl-bg').classList.toggle('sheet-collapsed', collapsed);   // un-dim + click-through when collapsed
+});
+$('rcl-close').addEventListener('click', () => {
+  $('reader-cl-bg').classList.add('hidden');
+  $('reader-cl-bg').classList.remove('sheet-collapsed');
+  $('reader-cl-sheet').classList.remove('collapsed');
+});
 // Reader mode (Beginner/Advanced) buttons re-run the current clarify in the new mode
 document.querySelectorAll('#reader-cl-sheet .cl-mode-btn').forEach(b =>
   b.addEventListener('click', () => { if (READER.clSeg && !READER.clarifying) openReaderClarify(READER.clSeg); }));

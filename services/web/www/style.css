@@ -1154,6 +1154,9 @@ select:focus { border-color: var(--blue); }
 }
 /* Clarify sits on its own row above the transport controls */
 .pf-clarify-row { display: flex; justify-content: center; margin-bottom: 14px; }
+/* Reader button in the transport row is mobile-only (desktop uses the header book icon) */
+.pf-reader-btn { display: none; }
+@media (max-width: 760px) { .pf-reader-btn { display: flex; } }
 /* Reader + transcript buttons grouped together at the right of the player header */
 .pf-header-btns { display: flex; align-items: center; gap: 4px; }
 .pf-btn {
@@ -2475,9 +2478,9 @@ select:focus { border-color: var(--blue); }
 .chat-float-title { font-family: var(--f-body); font-weight: 700; font-size: 16px; }
 .chat-float-min { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; color: var(--text-3); border-radius: 8px; transition: color var(--t-fast); }
 .chat-float-min:hover { color: var(--amber); }
-.chat-float-panel .cl-dialogue { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; }
-.chat-float-panel .cl-chat-messages { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
-.chat-float-panel .cl-chat-input-row { padding: 10px 12px; border-top: 1px solid var(--border); }
+.chat-float-panel .cl-dialogue { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; gap: 0; border-top: none; }
+.chat-float-panel .cl-chat-messages { flex: 1; max-height: none; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.chat-float-panel .cl-chat-input-row { padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
 @media (max-width: 760px) {
   .chat-float { right: 12px; bottom: calc(var(--mini-h) + 12px); }
   .chat-float-panel { width: calc(100vw - 24px); height: calc(100dvh - 120px); }

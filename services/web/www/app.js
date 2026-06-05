@@ -423,7 +423,7 @@ async function renderCollectionDetail(collId) {
     row.addEventListener('click', e => {
       if (e.target.closest('.coll-book-actions')) return;
       const full = S.books.find(bk => bk.id === b.id) || b;
-      openBook(full, collId);
+      openBookTap(full, collId);
     });
 
     row.querySelector('.coll-remove')?.addEventListener('click', async e => {
@@ -580,8 +580,15 @@ function makeBookCard(book) {
       ${pct > 0 ? `<div class="book-card-progress"><div style="width:${pct}%"></div></div>` : ''}
     </div>`;
   card.querySelector('.book-delete').addEventListener('click', e => { e.stopPropagation(); deleteBook(book.id); });
-  card.addEventListener('click', e => { if (!e.target.closest('.book-delete')) openBook(book); });
+  card.addEventListener('click', e => { if (!e.target.closest('.book-delete')) openBookTap(book); });
   return card;
+}
+
+// Tapping a book opens it. On mobile, jump straight into the reader (reading-first); the
+// player still loads underneath (paused) and is reachable via the reader's Back button.
+async function openBookTap(book, collId = null) {
+  await openBook(book, collId);
+  if (window.matchMedia('(max-width: 760px)').matches) openReader();
 }
 
 function makeBookMini(book) {
@@ -591,7 +598,7 @@ function makeBookMini(book) {
     <div class="book-mini-cover" style="background:${bookGradient(book.title)}">${bookCoverInner(book.title)}</div>
     <div class="book-mini-title">${esc(book.title)}</div>
     <div class="book-mini-lang">${LANG[book.source_lang] || book.source_lang}</div>`;
-  wrap.addEventListener('click', () => openBook(book));
+  wrap.addEventListener('click', () => openBookTap(book));
   return wrap;
 }
 
@@ -2270,7 +2277,8 @@ async function openReader() {
   collapseChat();
   // Resume at our own saved reading spot; first time, start where playback is.
   const saved = readerSavedPos(S.book.id);
-  const startT = saved != null ? saved : (audioEl.currentTime || 0);
+  // audio metadata may not be loaded yet (reader opened straight from a tap) — fall back to the book's progress
+  const startT = saved != null ? saved : (audioEl.currentTime || S.maxReadSec || 0);
   if (READER.bookId !== S.book.id || !READER.segs.length) {
     await readerLoadInitial(startT);
   }
@@ -2385,6 +2393,7 @@ function updateReaderProgress() {
 
 // ── Reader event wiring ──
 $('pf-read-btn').addEventListener('click', openReader);
+$('pf-reader-btn').addEventListener('click', openReader);   // mobile transport-row reader button
 $('reader-back').addEventListener('click', closeReader);
 $('reader-aa').addEventListener('click', () => $('reader-ctrl-bg').classList.remove('hidden'));
 $('reader-chat-btn').addEventListener('click', expandChat);

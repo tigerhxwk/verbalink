@@ -1724,16 +1724,16 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
         f"DISCUSS, don't dissect: when the student shares a thought, asks what you think, or wants to "
         f"talk about the story (a character's actions, motives, whether someone behaved well, the plot, "
         f"themes), engage directly and give your actual substantive answer/opinion grounded in the book. "
-        f"Do NOT explain, rephrase, or translate their question back to them — just answer it like a "
+        f"Do NOT explain, rephrase, or translate their question back to them, and do NOT preface your reply "
+        f"by restating or quoting the current sentence — just answer the question directly, like a "
         f"conversation partner.\n"
-        f"ALWAYS reply in the SAME language the student writes their question in. "
-        f"If they write in {tgt}, answer in {tgt}; if in {src}, answer in {src}. "
+        f"LANGUAGE — CRITICAL: reply in the EXACT language of the student's latest message. If they wrote in "
+        f"{tgt}, your entire answer must be in {tgt}; if in {src}, answer in {src}. Match their language even "
+        f"though this book is in {src}.\n"
         f"You may use light Markdown (bold, bullet lists) for clarity. Be concise and educational.\n"
-        + (f'The student is CURRENTLY on this sentence: "{current_text}"\n'
-           + (f'(Just before it: "{context_text}")\n' if context_text else "")
-           + 'When they say "it", "this", "this sentence", "this word", "the current/currently played '
-             'sentence" or similar without naming something specific, they mean THAT current sentence above '
-             '— not anything earlier in the conversation. Explain/answer about that sentence.\n'
+        + (f'For reference, the student is currently on this sentence: "{current_text}"'
+           + (f' (just before it: "{context_text}")' if context_text else "")
+           + '. Use it only as background to resolve "it"/"this"/"the current sentence"; do not announce it.\n'
            if current_text else "")
     )
 

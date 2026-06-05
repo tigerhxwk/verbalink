@@ -1174,6 +1174,19 @@ async def save_book_settings(book_id: str, body: BookSettings, user: dict = Depe
     return {"status": "saved"}
 
 
+@app.post("/api/books/{book_id}/reset-progress")
+async def reset_progress(book_id: str, user: dict = Depends(current_user)):
+    """Zero the stored playback position for a book (the client also clears its local copies)."""
+    conn = get_db()
+    if not conn.execute("SELECT id FROM books WHERE id=? AND user_id=?", (book_id, user["id"])).fetchone():
+        conn.close()
+        raise HTTPException(404)
+    conn.execute("UPDATE books SET progress_sec=0 WHERE id=?", (book_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "reset"}
+
+
 @app.get("/api/books/{book_id}/transcription-progress")
 async def transcription_progress(book_id: str, user: dict = Depends(current_user)):
     conn = get_db()
@@ -1686,15 +1699,15 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
     conn.close()
     history = [{"role": r["role"], "content": r["content"]} for r in reversed(hist_rows)]
 
-    # Try to get context segment
+    # The exact sentence the student is on, plus a few preceding for context.
+    current_text = ""
     context_text = ""
     try:
         segments, _ = _read_transcript(req.book_id)
-        # The sentence the student is looking at + a few before it (current sentence included)
         around = [s for s in segments if s["start"] <= req.position_sec]
         if around:
-            context_segs = around[-4:]
-            context_text = " ".join(s["text"].strip() for s in context_segs)
+            current_text = around[-1]["text"].strip()
+            context_text = " ".join(s["text"].strip() for s in around[-4:-1])
     except Exception:
         pass
 
@@ -1714,10 +1727,12 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
         f"ALWAYS reply in the SAME language the student writes their question in. "
         f"If they write in {tgt}, answer in {tgt}; if in {src}, answer in {src}. "
         f"You may use light Markdown (bold, bullet lists) for clarity. Be concise and educational.\n"
-        + (f'The student is currently looking at this passage: "{context_text}"\n'
-           f'When they say "it", "this", "this sentence", "this word" or similar without naming '
-           f'something specific, they mean THIS current passage — not anything from earlier in the '
-           f'conversation.\n' if context_text else "")
+        + (f'The student is CURRENTLY on this sentence: "{current_text}"\n'
+           + (f'(Just before it: "{context_text}")\n' if context_text else "")
+           + 'When they say "it", "this", "this sentence", "this word", "the current/currently played '
+             'sentence" or similar without naming something specific, they mean THAT current sentence above '
+             '— not anything earlier in the conversation. Explain/answer about that sentence.\n'
+           if current_text else "")
     )
 
     messages = [{"role": "system", "content": system_msg}] + history + [{"role": "user", "content": req.message}]

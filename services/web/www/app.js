@@ -851,6 +851,19 @@ $('mini-play-btn').addEventListener('click', () => { clearAutoResume(); audioEl.
 $('rewind-btn').addEventListener('click',  () => { audioEl.currentTime = Math.max(0, audioEl.currentTime - 15); });
 $('forward-btn').addEventListener('click', () => { audioEl.currentTime = Math.min(audioEl.duration || 0, audioEl.currentTime + 15); });
 
+$('pf-reset-btn').addEventListener('click', async () => {
+  if (!S.book) return;
+  if (!confirm('Reset listening progress for this book? Playback returns to the start and the spoiler blur covers everything again.')) return;
+  try { await api('POST', `/api/books/${S.book.id}/reset-progress`); } catch {}
+  localStorage.removeItem('pos:' + S.book.id);
+  localStorage.removeItem('reader_pos_' + S.book.id);
+  // Reset in-session trackers so the blur + essay timing restart from zero
+  S.maxReadSec = 0; S.listenedTotal = 0; S.essayRanges = []; _lastEssayListened = 0; _lastTickT = null;
+  audioEl.pause();
+  audioEl.currentTime = 0;     // fires 'seeked' → window refetch + highlight resync
+  updateActive(0);             // immediate blur refresh from the start
+});
+
 $('seek-bar').addEventListener('mousedown', () => { S.seeking = true; });
 $('seek-bar').addEventListener('touchstart', () => { S.seeking = true; }, { passive: true });
 let _seekFetchT = 0;
@@ -1492,11 +1505,12 @@ $('cl-chat-input').addEventListener('focus', () => setTimeout(scrollChatDown, 30
 // ── Floating book chat (collapsible; decoupled from clarify) ──
 // Anchor the chat's passage context to whatever the user is looking at right now.
 function currentChatPos() {
+  // The floating chat is general — anchor to where the user IS right now:
+  // the page they're reading, otherwise the current playback position.
   if (READER.open) {
     const el = readerFirstVisible();
     if (el) return parseFloat(el.dataset.start) || 0;
   }
-  if (_clarifyIsOpen() && _clarifyPos != null) return _clarifyPos;
   return audioEl.currentTime || 0;
 }
 function showChatFab() { if (S.book) $('chat-float').classList.remove('hidden'); }

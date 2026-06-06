@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion';
 import { bookGradient, bookInitial } from '../lib/cover';
 import { langName } from '../lib/lang';
+import Stars from './Stars';
 
 export default function BookCard({ book, onOpen }) {
   const pct = book.duration_sec ? Math.round((book.progress_sec || 0) / book.duration_sec * 100) : 0;
@@ -25,6 +26,7 @@ export default function BookCard({ book, onOpen }) {
       <div className="p-3">
         <div className="font-body font-bold text-sm leading-snug line-clamp-2 text-foreground">{book.title}</div>
         <div className="text-xs text-muted-foreground mt-1 truncate">{book.author || langName(book.source_lang)}</div>
+        {book.rating > 0 && <Stars value={book.rating} size={13} className="mt-1.5" />}
       </div>
     </motion.button>
   );

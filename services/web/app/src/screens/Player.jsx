@@ -8,6 +8,7 @@ import { usePlayer } from '../player';
 import Transcript from '../components/Transcript';
 import ClarifySheet from '../components/ClarifySheet';
 import ThemeLamp from '../components/ThemeLamp';
+import Stars from '../components/Stars';
 
 const fmt = (s) => { s = Math.max(0, s | 0); return `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`; };
 const idxAt = (segments, t) => { let i = -1; for (let k = 0; k < segments.length; k++) { if (segments[k].start <= t) i = k; else break; } return i; };
@@ -102,6 +103,7 @@ export default function Player() {
   const openEssay = usePlayer((s) => s.openEssay);
 
   const [tgt, setTgt] = useState(book?.target_lang || 'en');
+  const [rating, setRating] = useState(book?.rating || 0);
   const [segments, setSegments] = useState([]);
   const [showTranscript, setShowTranscript] = useState(false);
   const [blur, setBlur] = useState(true);
@@ -140,6 +142,7 @@ export default function Player() {
   if (!book) return null;
 
   const changeTgt = (v) => { setTgt(v); api('PUT', `/api/books/${book.id}/settings`, { target_lang: v }).catch(() => {}); };
+  const rate = (v) => { setRating(v); book.rating = v; api('PATCH', `/api/books/${book.id}`, { rating: v }).catch(() => {}); };
   const clarifyLine = (seg) => { if (seg) setClarifySeg(seg); };
   const clarifyCurrent = () => { const i = idxAt(segments, usePlayer.getState().cur); clarifyLine(segments[Math.max(0, i)] || segments[0]); };
   const prevLine = () => { const i = idxAt(segments, usePlayer.getState().cur); if (i > 0) playFrom(segments[i - 1].start); };
@@ -151,11 +154,9 @@ export default function Player() {
       className="fixed inset-0 z-50 flex items-center justify-center p-6 overflow-y-auto"
       style={{ backgroundColor: 'color-mix(in srgb, var(--background) 60%, transparent)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
 
-      <motion.div layout transition={{ type: 'spring', stiffness: 300, damping: 34 }}
-        onLayoutAnimationStart={() => usePlayer.getState().setDeckMoving(true)}
-        onLayoutAnimationComplete={() => usePlayer.getState().setDeckMoving(false)}
+      <motion.div
         className={cn('rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6',
-          showTranscript ? 'absolute left-6 top-6 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
+          showTranscript ? 'absolute left-6 top-1/2 -translate-y-1/2 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
 
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-1">
@@ -184,7 +185,7 @@ export default function Player() {
         <div className="flex flex-col items-center">
           <Cover book={book} />
           <h2 className="font-body font-bold text-xl text-center text-foreground leading-tight">{book.title}</h2>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2 mb-5">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2 mb-3">
             <span>{langName(book.source_lang)}</span>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             <select value={tgt} onChange={(e) => changeTgt(e.target.value)} title="Translate to"
@@ -192,6 +193,7 @@ export default function Player() {
               {Object.entries(LANG).map(([code, name]) => <option key={code} value={code}>{name}</option>)}
             </select>
           </div>
+          <Stars value={rating} onRate={rate} size={20} className="mb-5" />
         </div>
 
         <SeekRow dur={dur} seekTo={seekTo} />

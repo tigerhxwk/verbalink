@@ -241,6 +241,7 @@ def init_db():
         "ALTER TABLE books ADD COLUMN author TEXT",
         "ALTER TABLE books ADD COLUMN shared INTEGER DEFAULT 0",
         "ALTER TABLE books ADD COLUMN shared_key TEXT",
+        "ALTER TABLE books ADD COLUMN rating INTEGER DEFAULT 0",
     ]:
         try:
             conn.execute(migration)
@@ -1084,7 +1085,7 @@ async def upload_book(
 async def list_books(user: dict = Depends(current_user)):
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, title, duration_sec, source_lang, target_lang, transcription_status, translation_status, error, created_at, progress_sec, playback_speed, volume, clarify_mode FROM books WHERE user_id=? ORDER BY created_at DESC",
+        "SELECT id, title, duration_sec, source_lang, target_lang, transcription_status, translation_status, error, created_at, progress_sec, playback_speed, volume, clarify_mode, rating FROM books WHERE user_id=? ORDER BY created_at DESC",
         (user["id"],),
     ).fetchall()
     conn.close()
@@ -1104,6 +1105,7 @@ async def get_book(book_id: str, user: dict = Depends(current_user)):
 class BookPatch(BaseModel):
     target_lang: Optional[str] = None
     title: Optional[str] = None
+    rating: Optional[int] = None   # 0–5 stars (0 = unrated)
 
 
 @app.patch("/api/books/{book_id}")
@@ -1119,6 +1121,8 @@ async def patch_book(book_id: str, body: BookPatch, user: dict = Depends(current
         conn.execute("UPDATE books SET target_lang=? WHERE id=?", (body.target_lang, book_id))
     if body.title is not None:
         conn.execute("UPDATE books SET title=? WHERE id=?", (body.title.strip(), book_id))
+    if body.rating is not None:
+        conn.execute("UPDATE books SET rating=? WHERE id=?", (max(0, min(5, body.rating)), book_id))
     conn.commit()
     result = dict(conn.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone())
     conn.close()
@@ -1848,7 +1852,7 @@ async def librarian_stream(req: LibrarianRequest, user: dict = Depends(current_u
         "SELECT role, content FROM librarian_messages WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
         (user["id"], CHAT_CONTEXT_MESSAGES)).fetchall()
     catalog_rows = conn.execute(
-        "SELECT title, source_lang, target_lang, genres, synopsis, level, progress_sec, duration_sec "
+        "SELECT title, source_lang, target_lang, genres, synopsis, level, progress_sec, duration_sec, rating "
         "FROM books WHERE user_id=? AND transcription_status='done' ORDER BY created_at DESC",
         (user["id"],)).fetchall()
     # Community catalog (shared by other users — metadata only) to recommend from first
@@ -1872,6 +1876,8 @@ async def librarian_stream(req: LibrarianRequest, user: dict = Depends(current_u
             bits.append(f', {b["level"]}')
         bits.append(f', {pct}% read)')
         line = "".join(bits)
+        if b["rating"]:
+            line += f" — rated {'★' * b['rating']} ({b['rating']}/5)"
         if genres:
             line += f" — genres: {genres}"
         if b["synopsis"]:
@@ -1910,7 +1916,8 @@ async def librarian_stream(req: LibrarianRequest, user: dict = Depends(current_u
         "the timestamp from PASSAGES), summarize, and talk about their books. For this, only reference books "
         "in their CATALOG and never fabricate quotes or timestamps.\n"
         "2) RECOMMEND NEW books to explore (do NOT just point them back to books they already own). Infer their "
-        "taste from the CATALOG (genres, themes, authors, languages, difficulty). Then recommend in this order: "
+        "taste from the CATALOG (genres, themes, authors, languages, difficulty) — weighting the books they "
+        "RATED HIGHLY (★★★★+) most strongly and steering away from the genres/styles of low-rated ones. Then recommend in this order: "
         "FIRST pick fitting titles from the COMMUNITY LIBRARY below (real books other users have in this app — "
         "note that they're available here); if nothing there fits, THEN suggest other real, well-known published "
         "books from your own knowledge. Never invent fake titles, and never claim a recommended book is already "

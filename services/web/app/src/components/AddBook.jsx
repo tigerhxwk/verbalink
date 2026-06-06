@@ -22,7 +22,7 @@ export default function AddBook({ onClose, onUploaded }) {
   const [file, setFile] = useState(null);
   const [src, setSrc] = useState('ru');
   const [tgt, setTgt] = useState('en');
-  const [share, setShare] = useState(false);
+  const [share, setShare] = useState(true);
   const [progress, setProgress] = useState(null); // null idle, 0..1 uploading
   const [error, setError] = useState('');
   const [drag, setDrag] = useState(false);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../api';
 import { usePlayer } from '../player';
@@ -23,23 +23,68 @@ export default function Reader() {
   const closeReader = usePlayer((s) => s.closeReader);
   const openChat = usePlayer((s) => s.openChat);
   const playFrom = usePlayer((s) => s.playFrom);
+
   const [segments, setSegments] = useState([]);
   const [clarifySeg, setClarifySeg] = useState(null);
   const [showCtrl, setShowCtrl] = useState(false);
   const [font, setFont] = useState(1);
   const [line, setLine] = useState(1.7);
   const [bright, setBright] = useState(1);
-  const scrollRef = useRef(null);
-  const winRef = useRef({ start: 0, end: 0, hasPrev: false, hasNext: false });
-  const loadingRef = useRef(false);
+  const [col, setCol] = useState({ width: 0, pad: 0 });   // one column == one page
 
+  const scrollRef = useRef(null);
+  const segsRef = useRef([]);                              // latest segments for the stable loaders
+  const moreRef = useRef({ before: false, after: false });
+  const loadingRef = useRef(false);
+  const pitchRef = useRef(0);                              // page width in px
+  const snapRef = useRef(null);                            // debounce for snap-to-page
+
+  useEffect(() => { segsRef.current = segments; }, [segments]);
+
+  const fetchWindow = useCallback((t) => api('GET', `/api/books/${book.id}/sentences?around=${Math.max(0, t)}`), [book]);
+
+  // Pull in the adjacent window and merge it; stop a direction only when the window
+  // stops advancing (so a missing/incorrect has_next can never silently wall us off).
+  const loadMore = useCallback(async (dir) => {
+    const segs = segsRef.current;
+    const m = moreRef.current;
+    if (loadingRef.current || !segs.length) return 0;
+    if (dir > 0 && !m.after) return 0;
+    if (dir < 0 && !m.before) return 0;
+    loadingRef.current = true;
+    const el = scrollRef.current;
+    const prevW = el ? el.scrollWidth : 0, prevL = el ? el.scrollLeft : 0;
+    let added = 0;
+    try {
+      const anchor = dir > 0 ? segs[segs.length - 1].end + 0.05 : Math.max(0, segs[0].start - 0.05);
+      const d = await fetchWindow(anchor);
+      const map = new Map(segs.map((s) => [Math.round(s.start * 100), s]));
+      for (const s of (d.segments || [])) map.set(Math.round(s.start * 100), s);
+      const merged = [...map.values()].sort((a, b) => a.start - b.start);
+      added = merged.length - segs.length;
+      if (added > 0) {
+        setSegments(merged);
+        if (dir > 0) moreRef.current = { before: m.before, after: d.has_next ?? true };
+        else {
+          moreRef.current = { before: d.has_prev ?? true, after: m.after };
+          if (el) requestAnimationFrame(() => { el.scrollLeft = prevL + (el.scrollWidth - prevW); });
+        }
+      } else {
+        moreRef.current = dir > 0 ? { ...m, after: false } : { ...m, before: false }; // exhausted
+      }
+    } catch { /* leave as-is, retry on next scroll */ }
+    finally { loadingRef.current = false; }
+    return added;
+  }, [fetchWindow]);
+
+  // Initial window around the saved position + reading prefs.
   useEffect(() => {
     if (!book) return;
     loadingRef.current = true;
     const around = usePlayer.getState().book?.progress_sec || 0;
-    api('GET', `/api/books/${book.id}/sentences?around=${around}`).then((d) => {
+    api('GET', `/api/books/${book.id}/sentences?around=${Math.max(0, around)}`).then((d) => {
       setSegments(d.segments || []);
-      winRef.current = { start: d.window_start_sec || 0, end: d.window_end_sec || 0, hasPrev: !!d.has_prev, hasNext: !!d.has_next };
+      moreRef.current = { before: d.has_prev ?? false, after: d.has_next ?? true };
     }).catch(() => {}).finally(() => { loadingRef.current = false; });
     api('GET', '/api/settings').then((s) => {
       if (s.reader_font_scale) setFont(s.reader_font_scale);
@@ -48,44 +93,53 @@ export default function Reader() {
     }).catch(() => {});
   }, [book]);
 
+  // One column == the full page width (so each swipe/arrow is exactly one page).
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => {
+      const w = el.clientWidth;
+      const pad = Math.max(20, Math.round(w * 0.07));
+      setCol({ width: Math.max(120, w - pad * 2), pad });
+      pitchRef.current = w; // content + 2·pad == clientWidth
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   if (!book) return null;
 
   const savePref = (patch) => api('PUT', '/api/settings', patch).catch(() => {});
-  const page = (dir) => { const el = scrollRef.current; if (el) el.scrollBy({ left: dir * el.clientWidth, behavior: scrollBehavior() }); };
 
-  // Pull in more text as the reader scrolls toward either edge (append forward / prepend back).
-  const loadMore = (dir) => {
-    if (loadingRef.current) return;
-    const w = winRef.current;
-    if (dir > 0 && !w.hasNext) return;
-    if (dir < 0 && !w.hasPrev) return;
-    loadingRef.current = true;
+  // Snap to the nearest whole page once a free swipe/scroll settles (CSS scroll-snap can't
+  // target multicol columns, so we do it in JS).
+  const snapToPage = () => {
     const el = scrollRef.current;
-    const prevWidth = el ? el.scrollWidth : 0;
-    const prevLeft = el ? el.scrollLeft : 0;
-    const around = dir > 0 ? w.end + 1 : Math.max(0, w.start - 1);
-    api('GET', `/api/books/${book.id}/sentences?around=${around}`).then((d) => {
-      const incoming = d.segments || [];
-      setSegments((cur) => {
-        const byStart = new Map(cur.map((s) => [s.start, s]));
-        for (const s of incoming) byStart.set(s.start, s);
-        return [...byStart.values()].sort((a, b) => a.start - b.start);
-      });
-      winRef.current = {
-        start: Math.min(w.start, d.window_start_sec ?? w.start),
-        end: Math.max(w.end, d.window_end_sec ?? w.end),
-        hasPrev: dir < 0 ? !!d.has_prev : w.hasPrev,
-        hasNext: dir > 0 ? !!d.has_next : w.hasNext,
-      };
-      // Keep the reader in place when text is prepended on the left.
-      if (dir < 0 && el) requestAnimationFrame(() => { el.scrollLeft = prevLeft + (el.scrollWidth - prevWidth); });
-    }).catch(() => {}).finally(() => { loadingRef.current = false; });
+    const pitch = pitchRef.current;
+    if (!el || !pitch || loadingRef.current) return;
+    const target = Math.round(el.scrollLeft / pitch) * pitch;
+    if (Math.abs(el.scrollLeft - target) > 1) el.scrollTo({ left: target, behavior: scrollBehavior() });
   };
 
-  const onScroll = (e) => {
-    const el = e.currentTarget;
-    if (el.scrollLeft + el.clientWidth >= el.scrollWidth - el.clientWidth * 0.6) loadMore(1);
-    else if (el.scrollLeft <= el.clientWidth * 0.4) loadMore(-1);
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const pitch = pitchRef.current || el.clientWidth;
+    if (el.scrollLeft + el.clientWidth >= el.scrollWidth - pitch * 0.8) loadMore(1);
+    else if (el.scrollLeft <= pitch * 0.8) loadMore(-1);
+    if (snapRef.current) clearTimeout(snapRef.current);
+    snapRef.current = setTimeout(snapToPage, 110);
+  };
+
+  const page = async (dir) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const pitch = pitchRef.current || el.clientWidth;
+    if (dir > 0 && el.scrollLeft + el.clientWidth >= el.scrollWidth - pitch * 0.5) await loadMore(1);
+    if (dir < 0 && el.scrollLeft <= pitch * 0.5) await loadMore(-1);
+    el.scrollBy({ left: dir * pitch, behavior: scrollBehavior() });
   };
 
   return (
@@ -134,11 +188,12 @@ export default function Reader() {
         </div>
       </div>
 
-      {/* paginated text */}
+      {/* paginated text — one column per page */}
       <div className="relative flex-1 overflow-hidden">
-        <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-x-auto overflow-y-hidden px-[7vw] py-10"
-          style={{ scrollSnapType: 'x mandatory' }}>
-          <div className="h-full font-body text-foreground" style={{ columnWidth: '30rem', columnGap: '4rem', columnFill: 'auto', fontSize: `${(1.15 * font).toFixed(2)}rem`, lineHeight: line }}>
+        <div ref={scrollRef} onScroll={onScroll} className="h-full mx-auto w-full max-w-[44rem] overflow-x-auto overflow-y-hidden py-10"
+          style={{ paddingLeft: col.pad, paddingRight: col.pad }}>
+          <div className="h-full font-body text-foreground"
+            style={{ columnWidth: col.width ? `${col.width}px` : '30rem', columnGap: `${col.pad * 2}px`, columnFill: 'auto', fontSize: `${(1.15 * font).toFixed(2)}rem`, lineHeight: line }}>
             {segments.length === 0
               ? <p className="text-muted-foreground">No text available yet.</p>
               : segments.map((s, i) => (

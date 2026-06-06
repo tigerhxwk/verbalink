@@ -2,23 +2,21 @@ import { useStore } from '../store';
 import { cn } from '../lib/utils';
 
 const TIERS = [
-  { id: 'reader', name: 'Reader', plan: 'Free', engine: 'Piper', credits: '1,000', priority: 'Standard',
+  { id: 'reader', name: 'Reader', engine: 'Piper', credits: '1,000', priority: 'Standard',
     blurb: 'Everything you need to listen, read and learn.',
     perks: ['Listen, read & transcripts', 'Clarify & chat', 'Practice essays', 'Voice short books (~200 min/mo)'] },
-  { id: 'scholar', name: 'Scholar', plan: 'Next', engine: 'Kokoro', credits: '10,000', priority: 'Faster',
+  { id: 'scholar', name: 'Scholar', engine: 'Kokoro', credits: '10,000', priority: 'Faster',
     blurb: 'More credits and a richer voice for serious study.',
     perks: ['Everything in Reader', 'Natural Kokoro voicing', 'Higher queue priority', '≈ 24 h of voicing / mo'] },
-  { id: 'curator', name: 'Curator', plan: 'Premium', engine: 'F5/E2 + cloning', credits: 'Unlimited', priority: 'High',
+  { id: 'curator', name: 'Curator', engine: 'F5/E2 + cloning', credits: 'Unlimited', priority: 'High',
     blurb: 'Unlimited voicing and voice cloning.',
     perks: ['Everything in Scholar', 'F5/E2 high-fidelity voicing', 'Voice cloning', 'Unlimited credits'] },
-  { id: 'developer', name: 'Developer', plan: 'Staff', engine: 'F5/E2', credits: 'Unlimited', priority: 'Top',
-    blurb: 'Top priority plus control-plane access.',
-    perks: ['Everything in Curator', 'Top queue priority', 'Logs & user management', 'Database management'] },
 ];
 
 export default function Membership({ setPage }) {
   const { user } = useStore();
-  const current = user?.tier || (user?.is_admin ? 'developer' : 'reader');
+  // Tiers shown to members; the owner's own (developer) role is intentionally not listed.
+  const current = user?.tier || (user?.is_admin ? null : 'reader');
 
   return (
     <main className="flex-1 overflow-y-auto">
@@ -42,8 +40,7 @@ export default function Membership({ setPage }) {
                 className={cn('relative rounded-2xl border bg-card p-5 flex flex-col',
                   isCurrent ? 'border-primary ring-1 ring-primary' : 'border-border')}>
                 {isCurrent && <span className="absolute -top-2.5 left-5 px-2.5 py-0.5 rounded-full bg-primary text-primary-foreground text-[11px] font-bold uppercase tracking-wide">Current</span>}
-                <div className="text-xs text-muted-foreground uppercase tracking-wide">{t.plan}</div>
-                <div className="font-display text-2xl text-foreground mt-0.5">{t.name}</div>
+                <div className="font-display text-2xl text-foreground">{t.name}</div>
                 <p className="text-sm text-muted-foreground mt-1 min-h-[40px]">{t.blurb}</p>
 
                 <div className="grid grid-cols-2 gap-2 my-4 text-center">

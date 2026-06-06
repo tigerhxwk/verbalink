@@ -18,7 +18,11 @@ function IconBtn({ children, title, onClick, active }) {
 }
 
 export default function Reader() {
-  const { book, closeReader, openChat, playFrom } = usePlayer();
+  // Selective subscriptions: the reader is heavy and must NOT re-render on the ~4Hz `cur` tick.
+  const book = usePlayer((s) => s.book);
+  const closeReader = usePlayer((s) => s.closeReader);
+  const openChat = usePlayer((s) => s.openChat);
+  const playFrom = usePlayer((s) => s.playFrom);
   const [segments, setSegments] = useState([]);
   const [clarifySeg, setClarifySeg] = useState(null);
   const [showCtrl, setShowCtrl] = useState(false);

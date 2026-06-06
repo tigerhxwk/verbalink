@@ -71,8 +71,8 @@ export default function Player() {
       className="fixed inset-0 z-50 flex items-center justify-center p-6 overflow-y-auto"
       style={{ backgroundColor: 'color-mix(in srgb, var(--background) 55%, transparent)', backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)' }}>
 
-      <motion.div layout transition={{ type: 'spring', stiffness: 280, damping: 30 }}
-        className={cn('rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6',
+      <motion.div
+        className={cn('rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6 transition-[max-width] duration-300',
           showTranscript ? 'absolute left-6 top-1/2 -translate-y-1/2 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
 
         <div className="flex items-center justify-between mb-4">

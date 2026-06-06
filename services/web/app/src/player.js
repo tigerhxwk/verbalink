@@ -6,13 +6,19 @@ import { api } from './api';
 const audio = typeof window !== 'undefined' ? new Audio() : null;
 if (audio) audio.preload = 'metadata';
 
+// Actually-listened intervals, kept module-side and MUTATED so the ~4Hz timeupdate
+// doesn't allocate or churn store state every tick (only `cur`/`maxRead` go to the store).
+let listenRanges = [];
+const sumRanges = () => listenRanges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0);
+
 export const usePlayer = create((set, get) => ({
   book: null, expanded: false, playing: false, cur: 0, dur: 0, maxRead: 0, speed: 1, vol: 1,
   ranges: [], essayBaseSec: 0, essayOpen: false,
-  listenedSec: () => get().ranges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0),
-  markEssay: () => set((s) => ({ essayBaseSec: s.ranges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0) })),
-  // Opening an essay pauses playback and resets the "listened since last essay" baseline.
-  openEssay: () => { audio.pause(); set((s) => ({ essayOpen: true, essayBaseSec: s.ranges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0) })); },
+  listenedSec: () => sumRanges(),
+  markEssay: () => set({ essayBaseSec: sumRanges() }),
+  // Opening an essay pauses playback, snapshots the listened ranges for the prompt,
+  // and resets the "listened since last essay" baseline.
+  openEssay: () => { audio.pause(); set({ essayOpen: true, essayBaseSec: sumRanges(), ranges: [...listenRanges] }); },
   closeEssay: () => set({ essayOpen: false }),
   chatOpen: false,
   openChat: () => set({ chatOpen: true }),
@@ -27,6 +33,7 @@ export const usePlayer = create((set, get) => ({
     if (!cur || cur.id !== book.id) {
       audio.src = `/api/books/${book.id}/audio`;
       audio.load();
+      listenRanges = [];
       set({ book, cur: 0, dur: 0, maxRead: book.progress_sec || 0, playing: false, ranges: [], essayBaseSec: 0, essayOpen: false });
       const onMeta = () => {
         if (book.progress_sec) audio.currentTime = book.progress_sec;
@@ -41,6 +48,7 @@ export const usePlayer = create((set, get) => ({
   collapse: () => set({ expanded: false }),
   close() {
     audio.pause(); audio.removeAttribute('src'); audio.load();
+    listenRanges = [];
     set({ book: null, expanded: false, playing: false, cur: 0, dur: 0, maxRead: 0, chatOpen: false, essayOpen: false, ranges: [], essayBaseSec: 0 });
   },
   toggle() { audio.paused ? audio.play().catch(() => {}) : audio.pause(); },
@@ -54,19 +62,15 @@ export const usePlayer = create((set, get) => ({
 }));
 
 if (audio) {
-  audio.addEventListener('timeupdate', () => usePlayer.setState((s) => {
+  audio.addEventListener('timeupdate', () => {
     const t = audio.currentTime;
-    let ranges = s.ranges;
     if (!audio.paused) {
-      const last = ranges[ranges.length - 1];
-      if (last && t >= last.end && t - last.end < 2) {
-        ranges = [...ranges.slice(0, -1), { start: last.start, end: t }]; // continuous playback → extend
-      } else {
-        ranges = [...ranges, { start: t, end: t }]; // jump / fresh start → new interval
-      }
+      const last = listenRanges[listenRanges.length - 1];
+      if (last && t >= last.end && t - last.end < 2) last.end = t;  // continuous → extend
+      else listenRanges.push({ start: t, end: t });                 // jump/fresh → new interval
     }
-    return { cur: t, maxRead: audio.paused ? s.maxRead : Math.max(s.maxRead, t), ranges };
-  }));
+    usePlayer.setState((s) => ({ cur: t, maxRead: audio.paused ? s.maxRead : Math.max(s.maxRead, t) }));
+  });
   audio.addEventListener('loadedmetadata', () => usePlayer.setState({ dur: audio.duration || 0 }));
   audio.addEventListener('play', () => usePlayer.setState({ playing: true }));
   audio.addEventListener('pause', () => usePlayer.setState({ playing: false }));

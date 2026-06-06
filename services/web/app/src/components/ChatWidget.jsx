@@ -11,7 +11,15 @@ function Bubble({ role, text }) {
 }
 
 export default function ChatWidget() {
-  const { book, chatOpen, openChat, closeChat } = usePlayer();
+  // Selective subscriptions — avoid re-rendering on the ~4Hz `cur` tick (we read cur lazily on send).
+  const book = usePlayer((s) => s.book);
+  const chatOpen = usePlayer((s) => s.chatOpen);
+  const openChat = usePlayer((s) => s.openChat);
+  const closeChat = usePlayer((s) => s.closeChat);
+  // The full player and the reader each have their own chat button, so the floating
+  // bubble would duplicate it there — only show the FAB from the dashboard / mini-bar.
+  const expanded = usePlayer((s) => s.expanded);
+  const readerOpen = usePlayer((s) => s.readerOpen);
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -75,7 +83,7 @@ export default function ChatWidget() {
         )}
       </AnimatePresence>
 
-      {!chatOpen && (
+      {!chatOpen && !expanded && !readerOpen && (
         <button onClick={openChat} aria-label="Chat about this book" title="Chat"
           className="fixed bottom-28 md:bottom-20 right-5 z-[55] w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-xl flex items-center justify-center hover:brightness-110 hover:-translate-y-0.5 transition">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg>

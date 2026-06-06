@@ -1692,6 +1692,21 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
     tgt = LANG_NAMES.get(row["target_lang"], row["target_lang"])
     src = LANG_NAMES.get(row["source_lang"], row["source_lang"])
 
+    # Detect which language the student actually wrote in, and name it explicitly in the
+    # prompt — qwen tends to default to the book's language / English otherwise.
+    CYRILLIC_LANGS = {"ru", "uk", "be", "bg", "sr", "kk", "ky", "mk", "mn"}
+    msg_has_cyrillic = any('Ѐ' <= c <= 'ӿ' for c in req.message)
+    reply_lang = None
+    if msg_has_cyrillic:
+        reply_lang = (row["source_lang"] if row["source_lang"] in CYRILLIC_LANGS
+                      else row["target_lang"] if row["target_lang"] in CYRILLIC_LANGS else None)
+    else:
+        if row["source_lang"] not in CYRILLIC_LANGS:
+            reply_lang = row["source_lang"]
+        elif row["target_lang"] not in CYRILLIC_LANGS:
+            reply_lang = row["target_lang"]
+    reply_lang_name = LANG_NAMES.get(reply_lang) if reply_lang else None
+
     # Load the recent slice of this book's history (full history stays in DB)
     hist_rows = conn.execute(
         "SELECT role, content FROM chat_messages WHERE user_id=? AND book_id=? "
@@ -1727,17 +1742,22 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
         f"Do NOT explain, rephrase, or translate their question back to them, and do NOT preface your reply "
         f"by restating or quoting the current sentence — just answer the question directly, like a "
         f"conversation partner.\n"
-        f"LANGUAGE — CRITICAL: reply in the EXACT language of the student's latest message. If they wrote in "
-        f"{tgt}, your entire answer must be in {tgt}; if in {src}, answer in {src}. Match their language even "
-        f"though this book is in {src}.\n"
-        f"You may use light Markdown (bold, bullet lists) for clarity. Be concise and educational.\n"
+        + (f"LANGUAGE — CRITICAL: The student is writing in {reply_lang_name}. Your ENTIRE reply must be "
+           f"written in {reply_lang_name} and in no other language, even though this book is in {src}. "
+           f"Never switch to {src} or English.\n" if reply_lang_name else
+           f"LANGUAGE — CRITICAL: reply in the EXACT language of the student's latest message ({tgt} or {src}). "
+           f"Match their language even though this book is in {src}.\n")
+        + f"You may use light Markdown (bold, bullet lists) for clarity. Be concise and educational.\n"
         + (f'For reference, the student is currently on this sentence: "{current_text}"'
            + (f' (just before it: "{context_text}")' if context_text else "")
            + '. Use it only as background to resolve "it"/"this"/"the current sentence"; do not announce it.\n'
            if current_text else "")
     )
 
-    messages = [{"role": "system", "content": system_msg}] + history + [{"role": "user", "content": req.message}]
+    # Repeat the language instruction at the very end (recency) — strongest signal for the model.
+    model_message = (f"{req.message}\n\n[Respond only in {reply_lang_name}.]"
+                     if reply_lang_name else req.message)
+    messages = [{"role": "system", "content": system_msg}] + history + [{"role": "user", "content": model_message}]
 
     async def generate():
         full_response = []

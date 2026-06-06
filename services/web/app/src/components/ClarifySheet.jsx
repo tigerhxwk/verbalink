@@ -131,7 +131,7 @@ export default function ClarifySheet({ bookId, seg, onClose, onPlayLine }) {
         {wasPlaying && (
           <div className="border-t border-border">
             {count !== null && (
-              <motion.div className="h-0.5 bg-primary" initial={{ width: '100%' }} animate={{ width: '0%' }} transition={{ duration: RESUME_AFTER, ease: 'linear' }} />
+              <motion.div className="h-0.5 w-full bg-primary origin-left" initial={{ scaleX: 1 }} animate={{ scaleX: 0 }} transition={{ duration: RESUME_AFTER, ease: 'linear' }} />
             )}
             <div className="flex items-center gap-3 px-5 py-3">
               <span className="text-sm text-muted-foreground">

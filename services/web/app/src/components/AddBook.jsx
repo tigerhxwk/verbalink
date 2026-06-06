@@ -91,8 +91,8 @@ export default function AddBook({ onClose, onUploaded }) {
             </div>
             <AnimatePresence initial={false}>
               {showShareHelp && (
-                <motion.p initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden text-xs leading-relaxed text-muted-foreground">
+                <motion.p initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.18, ease: 'easeOut' }} className="text-xs leading-relaxed text-muted-foreground">
                   <span className="block mt-2 rounded-lg bg-popover border border-border p-3">
                     Only the book's <strong className="text-foreground">catalog info</strong> is shared — title, author, genres,
                     synopsis, level and language — so other readers can discover it and get recommendations.
@@ -108,7 +108,7 @@ export default function AddBook({ onClose, onUploaded }) {
           {busy && (
             <div>
               <div className="h-2 rounded-full bg-border overflow-hidden">
-                <div className="h-full bg-primary transition-[width] duration-150" style={{ width: `${Math.round(progress * 100)}%` }} />
+                <div className="h-full w-full bg-primary origin-left transition-transform duration-150" style={{ transform: `scaleX(${progress})` }} />
               </div>
               <div className="text-xs text-muted-foreground mt-1.5">{progress < 1 ? `Uploading… ${Math.round(progress * 100)}%` : 'Processing — transcription will start shortly.'}</div>
             </div>

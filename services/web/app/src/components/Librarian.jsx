@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, streamPost } from '../api';
 import { renderMarkdown } from '../lib/markdown';
-import { cn } from '../lib/utils';
+import { cn, scrollBehavior } from '../lib/utils';
 
 const SUGGESTIONS = [
   'Recommend something new to read',
@@ -24,7 +24,7 @@ export default function Librarian() {
   const scrollRef = useRef(null);
 
   useEffect(() => { api('GET', '/api/librarian').then((d) => setMsgs(d.messages || [])).catch(() => {}); }, []);
-  useEffect(() => { if (open) scrollRef.current?.scrollTo({ top: 1e9, behavior: 'smooth' }); }, [msgs, open]);
+  useEffect(() => { if (open) scrollRef.current?.scrollTo({ top: 1e9, behavior: scrollBehavior() }); }, [msgs, open]);
 
   async function send(text) {
     text = (text ?? input).trim();
@@ -74,8 +74,8 @@ export default function Librarian() {
 
       <AnimatePresence initial={false}>
         {hasChat && open && (
-          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 220, damping: 30 }} className="overflow-hidden">
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }} className="overflow-hidden">
             <div ref={scrollRef} className="px-5 pb-3 max-h-[42vh] overflow-y-auto flex flex-col gap-2.5">
               {msgs.map((m, i) => <Bubble key={i} role={m.role} text={m.content} />)}
             </div>

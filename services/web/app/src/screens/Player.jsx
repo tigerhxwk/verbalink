@@ -32,9 +32,10 @@ function Equalizer() {
   return (
     <div className="absolute bottom-2 right-2 flex items-end gap-[3px] h-4">
       {[0, 1, 2, 3].map((i) => (
-        <motion.span key={i} className="w-1 rounded-sm bg-white/90"
-          animate={{ height: ['28%', '100%', '40%', '85%', '28%'] }}
-          transition={{ duration: 0.85 + i * 0.18, repeat: Infinity, ease: 'easeInOut' }} style={{ height: '28%' }} />
+        // scaleY (GPU transform) instead of animating height → no per-frame layout/paint
+        <motion.span key={i} className="w-1 h-4 rounded-sm bg-white/90 origin-bottom"
+          animate={{ scaleY: [0.28, 1, 0.4, 0.85, 0.28] }}
+          transition={{ duration: 0.85 + i * 0.18, repeat: Infinity, ease: 'easeInOut' }} style={{ scaleY: 0.28 }} />
       ))}
     </div>
   );
@@ -69,10 +70,10 @@ export default function Player() {
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       onClick={(e) => { if (e.target === e.currentTarget) collapse(); }}
       className="fixed inset-0 z-50 flex items-center justify-center p-6 overflow-y-auto"
-      style={{ backgroundColor: 'color-mix(in srgb, var(--background) 55%, transparent)', backdropFilter: 'blur(18px)', WebkitBackdropFilter: 'blur(18px)' }}>
+      style={{ backgroundColor: 'color-mix(in srgb, var(--background) 60%, transparent)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
 
       <motion.div
-        className={cn('rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6 transition-[max-width] duration-300',
+        className={cn('transform-gpu rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6',
           showTranscript ? 'absolute left-6 top-1/2 -translate-y-1/2 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
 
         <div className="flex items-center justify-between mb-4">

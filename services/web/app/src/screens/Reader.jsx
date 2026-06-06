@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../api';
 import { usePlayer } from '../player';
 import { langName } from '../lib/lang';
-import { cn } from '../lib/utils';
+import { cn, scrollBehavior } from '../lib/utils';
 import ClarifySheet from '../components/ClarifySheet';
 import ThemeLamp from '../components/ThemeLamp';
 
@@ -44,7 +44,7 @@ export default function Reader() {
   if (!book) return null;
 
   const savePref = (patch) => api('PUT', '/api/settings', patch).catch(() => {});
-  const page = (dir) => { const el = scrollRef.current; if (el) el.scrollBy({ left: dir * el.clientWidth, behavior: 'smooth' }); };
+  const page = (dir) => { const el = scrollRef.current; if (el) el.scrollBy({ left: dir * el.clientWidth, behavior: scrollBehavior() }); };
 
   return (
     <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 18 }}

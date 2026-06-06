@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { cn } from '../lib/utils';
+import { cn, scrollBehavior } from '../lib/utils';
 
 // Wide transcript panel shown beside the player. Active line follows playback; lines past the
 // furthest-listened point are blurred (spoiler protection) and clear on hover.
 export default function Transcript({ segments, activeIdx, readIdx, blur, onClose, onClarify, onPlay, className }) {
   const activeRef = useRef(null);
-  useEffect(() => { activeRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [activeIdx]);
+  useEffect(() => { activeRef.current?.scrollIntoView({ block: 'center', behavior: scrollBehavior() }); }, [activeIdx]);
 
   return (
     <motion.div initial={{ opacity: 0, x: 30 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 30 }}
@@ -30,7 +30,7 @@ export default function Transcript({ segments, activeIdx, readIdx, blur, onClose
               <button onClick={() => onClarify(s)} title="Clarify this line"
                 className={'flex-1 text-left px-4 py-2.5 font-body text-lg leading-relaxed ' +
                   (i === activeIdx ? 'text-foreground' : 'text-muted-foreground group-hover:text-foreground')}>
-                <span className={unread ? 'blur-[3px] hover:blur-none transition-[filter] select-none' : ''}>{s.text}</span>
+                <span className={unread ? 'blur-[3px] hover:blur-none select-none' : ''}>{s.text}</span>
               </button>
               <button onClick={() => onPlay(s.start)} title="Play from here"
                 className="shrink-0 mt-2 mr-1 w-8 h-8 flex items-center justify-center rounded-full text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-primary hover:bg-accent/50 transition">

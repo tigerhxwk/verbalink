@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { api, streamPost } from '../api';
 import { usePlayer } from '../player';
 import { renderMarkdown } from '../lib/markdown';
+import { scrollBehavior } from '../lib/utils';
 
 function Bubble({ role, text }) {
   const base = 'max-w-[85%] rounded-xl px-3.5 py-2.5 text-[15px] leading-relaxed';
@@ -33,7 +34,7 @@ export default function ChatWidget() {
     api('GET', `/api/chat/${book.id}`).then((d) => setMsgs(d.messages || [])).catch(() => setMsgs([]));
   }, [book, chatOpen]);
 
-  useEffect(() => { scrollRef.current?.scrollTo({ top: 1e9, behavior: 'smooth' }); }, [msgs]);
+  useEffect(() => { scrollRef.current?.scrollTo({ top: 1e9, behavior: scrollBehavior() }); }, [msgs]);
 
   if (!book) return null;
 

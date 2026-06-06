@@ -1,0 +1,79 @@
+import { create } from 'zustand';
+import { api } from './api';
+
+// One persistent <audio> that outlives the full-player overlay, so collapsing to the
+// mini playbar keeps playback going. State mirrored into the store for the UI.
+const audio = typeof window !== 'undefined' ? new Audio() : null;
+if (audio) audio.preload = 'metadata';
+
+export const usePlayer = create((set, get) => ({
+  book: null, expanded: false, playing: false, cur: 0, dur: 0, maxRead: 0, speed: 1, vol: 1,
+  ranges: [], essayBaseSec: 0, essayOpen: false,
+  listenedSec: () => get().ranges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0),
+  markEssay: () => set((s) => ({ essayBaseSec: s.ranges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0) })),
+  // Opening an essay pauses playback and resets the "listened since last essay" baseline.
+  openEssay: () => { audio.pause(); set((s) => ({ essayOpen: true, essayBaseSec: s.ranges.reduce((a, r) => a + Math.max(0, r.end - r.start), 0) })); },
+  closeEssay: () => set({ essayOpen: false }),
+  chatOpen: false,
+  openChat: () => set({ chatOpen: true }),
+  toggleChat: () => set((s) => ({ chatOpen: !s.chatOpen })),
+  closeChat: () => set({ chatOpen: false }),
+  readerOpen: false,
+  openReader: () => set({ readerOpen: true, expanded: false }),
+  closeReader: () => set({ readerOpen: false }),
+
+  open(book) {
+    const cur = get().book;
+    if (!cur || cur.id !== book.id) {
+      audio.src = `/api/books/${book.id}/audio`;
+      audio.load();
+      set({ book, cur: 0, dur: 0, maxRead: book.progress_sec || 0, playing: false, ranges: [], essayBaseSec: 0, essayOpen: false });
+      const onMeta = () => {
+        if (book.progress_sec) audio.currentTime = book.progress_sec;
+        set({ dur: audio.duration || 0 });
+        audio.removeEventListener('loadedmetadata', onMeta);
+      };
+      audio.addEventListener('loadedmetadata', onMeta);
+    }
+    set({ expanded: true });
+  },
+  expand: () => set({ expanded: true }),
+  collapse: () => set({ expanded: false }),
+  close() {
+    audio.pause(); audio.removeAttribute('src'); audio.load();
+    set({ book: null, expanded: false, playing: false, cur: 0, dur: 0, maxRead: 0, chatOpen: false, essayOpen: false, ranges: [], essayBaseSec: 0 });
+  },
+  toggle() { audio.paused ? audio.play().catch(() => {}) : audio.pause(); },
+  pause() { audio.pause(); },
+  resume() { audio.play().catch(() => {}); },
+  seekTo(t) { audio.currentTime = t; set({ cur: t }); },
+  playFrom(t) { audio.currentTime = t; audio.play().catch(() => {}); set({ cur: t }); },
+  skip(d) { audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + d)); },
+  setRate(v) { audio.playbackRate = v; set({ speed: v }); },
+  setVolume(v) { audio.volume = v; set({ vol: v }); },
+}));
+
+if (audio) {
+  audio.addEventListener('timeupdate', () => usePlayer.setState((s) => {
+    const t = audio.currentTime;
+    let ranges = s.ranges;
+    if (!audio.paused) {
+      const last = ranges[ranges.length - 1];
+      if (last && t >= last.end && t - last.end < 2) {
+        ranges = [...ranges.slice(0, -1), { start: last.start, end: t }]; // continuous playback → extend
+      } else {
+        ranges = [...ranges, { start: t, end: t }]; // jump / fresh start → new interval
+      }
+    }
+    return { cur: t, maxRead: audio.paused ? s.maxRead : Math.max(s.maxRead, t), ranges };
+  }));
+  audio.addEventListener('loadedmetadata', () => usePlayer.setState({ dur: audio.duration || 0 }));
+  audio.addEventListener('play', () => usePlayer.setState({ playing: true }));
+  audio.addEventListener('pause', () => usePlayer.setState({ playing: false }));
+  // persist progress occasionally (best-effort)
+  let last = 0;
+  audio.addEventListener('timeupdate', () => {
+    const b = usePlayer.getState().book;
+    if (b && audio.currentTime - last > 5) { last = audio.currentTime; api('PUT', `/api/books/${b.id}/settings`, { progress_sec: audio.currentTime }).catch(() => {}); }
+  });
+}

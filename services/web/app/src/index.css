@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Solar Dusk (21st.dev) — shadcn token names so shadcn components theme natively ── */
+:root, :root[data-theme="dark"] {
+  --background:#1C1917; --foreground:#F5F5F4;
+  --card:#292524; --card-foreground:#F5F5F4;
+  --popover:#292524; --popover-foreground:#F5F5F4;
+  --primary:#F97316; --primary-foreground:#FFFFFF;
+  --secondary:#57534E; --secondary-foreground:#E7E5E4;
+  --muted:#292524; --muted-foreground:#A8A29E;
+  --accent:#1e4252; --accent-foreground:#E7E5E4;
+  --destructive:#DC2626; --destructive-foreground:#FFFFFF;
+  --border:#44403C; --input:#44403C; --ring:#F97316;
+  --primary-dim: rgba(249,115,22,0.10); --radius:0.6rem;
+  --logo:#F97316;
+}
+:root[data-theme="light"] {
+  --background:#FDFBF7; --foreground:#4A3B33;
+  --card:#F8F4EE; --card-foreground:#4A3B33;
+  --popover:#F8F4EE; --popover-foreground:#4A3B33;
+  --primary:#B45309; --primary-foreground:#FFFFFF;
+  --secondary:#E4C090; --secondary-foreground:#57534E;
+  --muted:#F1E9DA; --muted-foreground:#78716C;
+  --accent:#f2daba; --accent-foreground:#57534E;
+  --destructive:#991B1B; --destructive-foreground:#FFFFFF;
+  --border:#E4D9BC; --input:#E4D9BC; --ring:#B45309;
+  --primary-dim: rgba(180,83,9,0.10);
+  --logo:#57534E;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Bespoke login-ticket bits (no shadcn equivalent; hand-built) ── */
+.ticket-rail {
+  position: absolute; top: 0; bottom: 0; width: 14px;
+  background-image: radial-gradient(circle at center, var(--background) 3.5px, transparent 4px);
+  background-size: 14px 16px; background-repeat: repeat-y; background-position: center;
+}
+.login-stamp {
+  position: absolute; top: 46%; left: 50%; width: 158px; height: 158px; margin: -79px 0 0 -79px;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  border: 4px solid currentColor; border-radius: 50%;
+  font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 26px;
+  letter-spacing: 0.08em; text-transform: uppercase; line-height: 1.05;
+  pointer-events: none; mix-blend-mode: screen;
+}
+:root[data-theme="light"] .login-stamp { mix-blend-mode: multiply; }
+
+/* ── Markdown rendered in chat bubbles ── */
+.md p { margin: 0 0 6px; }
+.md p:last-child { margin-bottom: 0; }
+.md ul, .md ol { margin: 4px 0; padding-left: 20px; }
+.md li { margin: 2px 0; }
+.md code { background: var(--muted); border-radius: 4px; padding: 1px 5px; font-size: 0.85em; font-family: ui-monospace, Menlo, monospace; }
+.md strong { color: var(--foreground); font-weight: 700; }
+.md .md-h { font-weight: 700; color: var(--foreground); margin: 8px 0 3px; }
+.md .md-table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; display: block; overflow-x: auto; }
+.md .md-table th, .md .md-table td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; vertical-align: top; }
+.md .md-table th { background: var(--muted); font-weight: 600; color: var(--foreground); }

@@ -25,8 +25,9 @@ export const usePlayer = create((set, get) => ({
   toggleChat: () => set((s) => ({ chatOpen: !s.chatOpen })),
   closeChat: () => set({ chatOpen: false }),
   readerOpen: false,
-  openReader: () => set({ readerOpen: true, expanded: false }),
-  closeReader: () => set({ readerOpen: false }),
+  // Opening the reader pauses playback; closing it returns to the full player (back-button feel).
+  openReader: () => { audio.pause(); set({ readerOpen: true, expanded: false }); },
+  closeReader: () => set({ readerOpen: false, expanded: true }),
 
   open(book) {
     const cur = get().book;

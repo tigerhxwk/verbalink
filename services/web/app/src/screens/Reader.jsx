@@ -30,10 +30,17 @@ export default function Reader() {
   const [line, setLine] = useState(1.7);
   const [bright, setBright] = useState(1);
   const scrollRef = useRef(null);
+  const winRef = useRef({ start: 0, end: 0, hasPrev: false, hasNext: false });
+  const loadingRef = useRef(false);
 
   useEffect(() => {
     if (!book) return;
-    api('GET', `/api/books/${book.id}/sentences?around=0`).then((d) => setSegments(d.segments || [])).catch(() => {});
+    loadingRef.current = true;
+    const around = usePlayer.getState().book?.progress_sec || 0;
+    api('GET', `/api/books/${book.id}/sentences?around=${around}`).then((d) => {
+      setSegments(d.segments || []);
+      winRef.current = { start: d.window_start_sec || 0, end: d.window_end_sec || 0, hasPrev: !!d.has_prev, hasNext: !!d.has_next };
+    }).catch(() => {}).finally(() => { loadingRef.current = false; });
     api('GET', '/api/settings').then((s) => {
       if (s.reader_font_scale) setFont(s.reader_font_scale);
       if (s.reader_line_spacing) setLine(s.reader_line_spacing);
@@ -45,6 +52,41 @@ export default function Reader() {
 
   const savePref = (patch) => api('PUT', '/api/settings', patch).catch(() => {});
   const page = (dir) => { const el = scrollRef.current; if (el) el.scrollBy({ left: dir * el.clientWidth, behavior: scrollBehavior() }); };
+
+  // Pull in more text as the reader scrolls toward either edge (append forward / prepend back).
+  const loadMore = (dir) => {
+    if (loadingRef.current) return;
+    const w = winRef.current;
+    if (dir > 0 && !w.hasNext) return;
+    if (dir < 0 && !w.hasPrev) return;
+    loadingRef.current = true;
+    const el = scrollRef.current;
+    const prevWidth = el ? el.scrollWidth : 0;
+    const prevLeft = el ? el.scrollLeft : 0;
+    const around = dir > 0 ? w.end + 1 : Math.max(0, w.start - 1);
+    api('GET', `/api/books/${book.id}/sentences?around=${around}`).then((d) => {
+      const incoming = d.segments || [];
+      setSegments((cur) => {
+        const byStart = new Map(cur.map((s) => [s.start, s]));
+        for (const s of incoming) byStart.set(s.start, s);
+        return [...byStart.values()].sort((a, b) => a.start - b.start);
+      });
+      winRef.current = {
+        start: Math.min(w.start, d.window_start_sec ?? w.start),
+        end: Math.max(w.end, d.window_end_sec ?? w.end),
+        hasPrev: dir < 0 ? !!d.has_prev : w.hasPrev,
+        hasNext: dir > 0 ? !!d.has_next : w.hasNext,
+      };
+      // Keep the reader in place when text is prepended on the left.
+      if (dir < 0 && el) requestAnimationFrame(() => { el.scrollLeft = prevLeft + (el.scrollWidth - prevWidth); });
+    }).catch(() => {}).finally(() => { loadingRef.current = false; });
+  };
+
+  const onScroll = (e) => {
+    const el = e.currentTarget;
+    if (el.scrollLeft + el.clientWidth >= el.scrollWidth - el.clientWidth * 0.6) loadMore(1);
+    else if (el.scrollLeft <= el.clientWidth * 0.4) loadMore(-1);
+  };
 
   return (
     <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 18 }}
@@ -94,7 +136,7 @@ export default function Reader() {
 
       {/* paginated text */}
       <div className="relative flex-1 overflow-hidden">
-        <div ref={scrollRef} className="h-full overflow-x-auto overflow-y-hidden px-[7vw] py-10"
+        <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-x-auto overflow-y-hidden px-[7vw] py-10"
           style={{ scrollSnapType: 'x mandatory' }}>
           <div className="h-full font-body text-foreground" style={{ columnWidth: '30rem', columnGap: '4rem', columnFill: 'auto', fontSize: `${(1.15 * font).toFixed(2)}rem`, lineHeight: line }}>
             {segments.length === 0

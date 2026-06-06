@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, streamPost } from '../api';
 import { renderMarkdown } from '../lib/markdown';
-import { cn, scrollBehavior } from '../lib/utils';
+import { cn } from '../lib/utils';
 
 const SUGGESTIONS = [
   'Recommend something new to read',
@@ -24,7 +24,7 @@ export default function Librarian() {
   const scrollRef = useRef(null);
 
   useEffect(() => { api('GET', '/api/librarian').then((d) => setMsgs(d.messages || [])).catch(() => {}); }, []);
-  useEffect(() => { if (open) scrollRef.current?.scrollTo({ top: 1e9, behavior: scrollBehavior() }); }, [msgs, open]);
+  useEffect(() => { if (open) scrollRef.current?.scrollTo({ top: 1e9 }); }, [msgs, open]);
 
   async function send(text) {
     text = (text ?? input).trim();

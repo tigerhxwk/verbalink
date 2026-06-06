@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { bookGradient, bookInitial } from '../lib/cover';
 import { LANG, langName } from '../lib/lang';
@@ -10,6 +10,7 @@ import ClarifySheet from '../components/ClarifySheet';
 import ThemeLamp from '../components/ThemeLamp';
 
 const fmt = (s) => { s = Math.max(0, s | 0); return `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`; };
+const idxAt = (segments, t) => { let i = -1; for (let k = 0; k < segments.length; k++) { if (segments[k].start <= t) i = k; else break; } return i; };
 
 function TBtn({ children, label, onClick, title }) {
   return (
@@ -41,30 +42,92 @@ function Equalizer() {
   );
 }
 
+// Isolated `cur` subscriber so the rest of the deck doesn't re-render ~4×/sec.
+function SeekRow({ dur, seekTo }) {
+  const cur = usePlayer((s) => s.cur);
+  return (
+    <>
+      <input type="range" min={0} max={dur || 0} step={0.1} value={Math.min(cur, dur || 0)} onChange={(e) => seekTo(+e.target.value)}
+             className="w-full accent-[var(--primary)] cursor-pointer" />
+      <div className="flex justify-between w-full text-sm text-muted-foreground mb-5 tabular-nums"><span>{fmt(cur)}</span><span>{fmt(dur)}</span></div>
+    </>
+  );
+}
+
+// Karaoke transcript — subscribes to cur/maxRead itself so toggling it doesn't re-render the deck.
+function LiveTranscript({ segments, blur, onClose, onClarify, onPlay }) {
+  const cur = usePlayer((s) => s.cur);
+  const maxRead = usePlayer((s) => s.maxRead);
+  const activeIdx = idxAt(segments, cur);
+  const readIdx = idxAt(segments, maxRead);
+  return (
+    <Transcript segments={segments} activeIdx={activeIdx} readIdx={readIdx} blur={blur}
+      className="w-full max-w-3xl h-[85vh]" onClose={onClose} onClarify={onClarify} onPlay={onPlay} />
+  );
+}
+
 export default function Player() {
-  const { book, playing, cur, dur, speed, vol, maxRead,
-          toggle, seekTo, playFrom, skip, setRate, setVolume, collapse, openChat, openReader, openEssay } = usePlayer();
+  // Selective subscriptions — NOT `cur`, so the deck (with its layout animation) is stable.
+  const book = usePlayer((s) => s.book);
+  const playing = usePlayer((s) => s.playing);
+  const dur = usePlayer((s) => s.dur);
+  const speed = usePlayer((s) => s.speed);
+  const vol = usePlayer((s) => s.vol);
+  const toggle = usePlayer((s) => s.toggle);
+  const seekTo = usePlayer((s) => s.seekTo);
+  const playFrom = usePlayer((s) => s.playFrom);
+  const skip = usePlayer((s) => s.skip);
+  const setRate = usePlayer((s) => s.setRate);
+  const setVolume = usePlayer((s) => s.setVolume);
+  const collapse = usePlayer((s) => s.collapse);
+  const openChat = usePlayer((s) => s.openChat);
+  const openReader = usePlayer((s) => s.openReader);
+  const openEssay = usePlayer((s) => s.openEssay);
+
   const [tgt, setTgt] = useState(book?.target_lang || 'en');
   const [segments, setSegments] = useState([]);
   const [showTranscript, setShowTranscript] = useState(false);
   const [blur, setBlur] = useState(true);
   const [clarifySeg, setClarifySeg] = useState(null);
+  const [moving, setMoving] = useState(false); // true while the deck slides aside — pause inner loops
+  const winRef = useRef({ start: 0, end: 0, hasPrev: false, hasNext: false });
+  const loadingRef = useRef(false);
 
+  // Transcript windowing: load around the *actual* position and re-load as playback
+  // crosses the loaded window — otherwise the transcript is stuck at the book's start
+  // and disagrees with what chat/clarify report.
   useEffect(() => {
     if (!book) return;
-    api('GET', `/api/books/${book.id}/sentences?around=0`).then((d) => setSegments(d.segments || [])).catch(() => {});
     api('GET', '/api/settings').then((s) => setBlur(!!s.blur_unread)).catch(() => {});
+
+    const loadWindow = (around) => {
+      loadingRef.current = true;
+      api('GET', `/api/books/${book.id}/sentences?around=${around}`)
+        .then((d) => {
+          setSegments(d.segments || []);
+          winRef.current = { start: d.window_start_sec || 0, end: d.window_end_sec || 0, hasPrev: !!d.has_prev, hasNext: !!d.has_next };
+        })
+        .catch(() => {})
+        .finally(() => { loadingRef.current = false; });
+    };
+
+    loadWindow(usePlayer.getState().cur || book.progress_sec || 0);
+
+    const unsub = usePlayer.subscribe((s) => {
+      if (loadingRef.current) return;
+      const w = winRef.current;
+      if ((w.hasNext && s.cur > w.end - 8) || (w.hasPrev && s.cur < w.start + 2)) loadWindow(s.cur);
+    });
+    return unsub;
   }, [book]);
 
   if (!book) return null;
 
-  let activeIdx = -1, readIdx = -1;
-  for (let i = 0; i < segments.length; i++) { if (segments[i].start <= cur) activeIdx = i; else break; }
-  for (let i = 0; i < segments.length; i++) { if (segments[i].start <= maxRead) readIdx = i; else break; }
-
   const changeTgt = (v) => { setTgt(v); api('PUT', `/api/books/${book.id}/settings`, { target_lang: v }).catch(() => {}); };
   const clarifyLine = (seg) => { if (seg) setClarifySeg(seg); };
-  const clarifyCurrent = () => clarifyLine(segments[Math.max(0, activeIdx)] || segments[0]);
+  const clarifyCurrent = () => { const i = idxAt(segments, usePlayer.getState().cur); clarifyLine(segments[Math.max(0, i)] || segments[0]); };
+  const prevLine = () => { const i = idxAt(segments, usePlayer.getState().cur); if (i > 0) playFrom(segments[i - 1].start); };
+  const nextLine = () => { const i = idxAt(segments, usePlayer.getState().cur); if (i >= 0 && i < segments.length - 1) playFrom(segments[i + 1].start); };
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
@@ -72,9 +135,10 @@ export default function Player() {
       className="fixed inset-0 z-50 flex items-center justify-center p-6 overflow-y-auto"
       style={{ backgroundColor: 'color-mix(in srgb, var(--background) 60%, transparent)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
 
-      <motion.div
-        className={cn('transform-gpu rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6',
-          showTranscript ? 'absolute left-6 top-1/2 -translate-y-1/2 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
+      <motion.div layout transition={{ type: 'spring', stiffness: 300, damping: 34 }}
+        onLayoutAnimationStart={() => setMoving(true)} onLayoutAnimationComplete={() => setMoving(false)}
+        className={cn('rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6',
+          showTranscript ? 'absolute left-6 top-6 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
 
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-1">
@@ -101,12 +165,14 @@ export default function Player() {
         </div>
 
         <div className="flex flex-col items-center">
-          <motion.div animate={{ scale: playing ? [1, 1.015, 1] : 1 }}
-            transition={{ duration: 3.6, repeat: playing ? Infinity : 0, ease: 'easeInOut' }}
+          {/* pause the cover/equalizer loops while the deck is sliding — avoids competing with
+              Framer's layout scale-correction and keeps the move buttery */}
+          <motion.div animate={{ scale: (playing && !moving) ? [1, 1.015, 1] : 1 }}
+            transition={{ duration: 3.6, repeat: (playing && !moving) ? Infinity : 0, ease: 'easeInOut' }}
             className="relative w-40 h-40 rounded-2xl flex items-center justify-center mb-5 shadow-xl border border-border"
             style={{ background: bookGradient(book.title) }}>
             <span className="font-display text-6xl text-white/90 select-none">{bookInitial(book.title)}</span>
-            {playing && <Equalizer />}
+            {playing && !moving && <Equalizer />}
           </motion.div>
           <h2 className="font-body font-bold text-xl text-center text-foreground leading-tight">{book.title}</h2>
           <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2 mb-5">
@@ -119,9 +185,7 @@ export default function Player() {
           </div>
         </div>
 
-        <input type="range" min={0} max={dur || 0} step={0.1} value={Math.min(cur, dur || 0)} onChange={(e) => seekTo(+e.target.value)}
-               className="w-full accent-[var(--primary)] cursor-pointer" />
-        <div className="flex justify-between w-full text-sm text-muted-foreground mb-5 tabular-nums"><span>{fmt(cur)}</span><span>{fmt(dur)}</span></div>
+        <SeekRow dur={dur} seekTo={seekTo} />
 
         <div className="flex flex-col items-center">
           <button onClick={clarifyCurrent}
@@ -130,7 +194,7 @@ export default function Player() {
             Clarify
           </button>
           <div className="flex items-center justify-center gap-3 mb-6">
-            <TBtn label="line" title="Previous line" onClick={() => activeIdx > 0 && playFrom(segments[activeIdx - 1].start)}>
+            <TBtn label="line" title="Previous line" onClick={prevLine}>
               <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
             </TBtn>
             <TBtn label="15" title="Back 15s" onClick={() => skip(-15)}>
@@ -145,7 +209,7 @@ export default function Player() {
             <TBtn label="15" title="Forward 15s" onClick={() => skip(15)}>
               <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             </TBtn>
-            <TBtn label="line" title="Next line" onClick={() => activeIdx < segments.length - 1 && playFrom(segments[activeIdx + 1].start)}>
+            <TBtn label="line" title="Next line" onClick={nextLine}>
               <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
             </TBtn>
           </div>
@@ -167,11 +231,8 @@ export default function Player() {
 
       <AnimatePresence>
         {showTranscript && (
-          <Transcript segments={segments} activeIdx={activeIdx} readIdx={readIdx} blur={blur}
-            className="w-full max-w-3xl h-[85vh]"
-            onClose={() => setShowTranscript(false)}
-            onClarify={clarifyLine}
-            onPlay={(t) => playFrom(t)} />
+          <LiveTranscript segments={segments} blur={blur}
+            onClose={() => setShowTranscript(false)} onClarify={clarifyLine} onPlay={(t) => playFrom(t)} />
         )}
       </AnimatePresence>
 

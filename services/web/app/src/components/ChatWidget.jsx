@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { api, streamPost } from '../api';
 import { usePlayer } from '../player';
 import { renderMarkdown } from '../lib/markdown';
-import { scrollBehavior } from '../lib/utils';
 
 function Bubble({ role, text }) {
   const base = 'max-w-[85%] rounded-xl px-3.5 py-2.5 text-[15px] leading-relaxed';
@@ -34,7 +33,8 @@ export default function ChatWidget() {
     api('GET', `/api/chat/${book.id}`).then((d) => setMsgs(d.messages || [])).catch(() => setMsgs([]));
   }, [book, chatOpen]);
 
-  useEffect(() => { scrollRef.current?.scrollTo({ top: 1e9, behavior: scrollBehavior() }); }, [msgs]);
+  // Pin to bottom instantly — smooth-scrolling on every streamed token fights itself and looks ragged.
+  useEffect(() => { scrollRef.current?.scrollTo({ top: 1e9 }); }, [msgs]);
 
   if (!book) return null;
 
@@ -60,7 +60,7 @@ export default function ChatWidget() {
         {chatOpen && (
           <motion.div initial={{ opacity: 0, y: 20, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 20, scale: 0.97 }}
             transition={{ type: 'spring', stiffness: 320, damping: 28 }}
-            className="fixed bottom-16 md:bottom-4 right-2 sm:right-4 z-[60] w-[360px] max-w-[calc(100vw-1rem)] h-[460px] max-h-[calc(100dvh-6rem)] rounded-2xl bg-card border border-border shadow-2xl flex flex-col">
+            className="fixed bottom-32 md:bottom-4 right-2 sm:right-4 z-[60] w-[360px] max-w-[calc(100vw-1rem)] h-[460px] max-h-[calc(100dvh-10rem)] rounded-2xl bg-card border border-border shadow-2xl flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-border">
               <span className="font-body font-bold text-foreground">Chat</span>
               <button onClick={closeChat} aria-label="Minimize chat" className="w-8 h-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground">
@@ -86,7 +86,7 @@ export default function ChatWidget() {
 
       {!chatOpen && !expanded && !readerOpen && (
         <button onClick={openChat} aria-label="Chat about this book" title="Chat"
-          className="fixed bottom-28 md:bottom-20 right-5 z-[55] w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-xl flex items-center justify-center hover:brightness-110 hover:-translate-y-0.5 transition">
+          className="fixed bottom-32 md:bottom-20 right-5 z-[55] w-14 h-14 rounded-full bg-primary text-primary-foreground shadow-xl flex items-center justify-center hover:brightness-110 hover:-translate-y-0.5 transition">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg>
         </button>
       )}

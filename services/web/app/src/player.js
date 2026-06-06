@@ -28,6 +28,10 @@ export const usePlayer = create((set, get) => ({
   // Opening the reader pauses playback; closing it returns to the full player (back-button feel).
   openReader: () => { audio.pause(); set({ readerOpen: true, expanded: false }); },
   closeReader: () => set({ readerOpen: false, expanded: true }),
+  // True while the player deck is sliding aside. Set from the deck's layout-animation callbacks,
+  // read only by the cover/equalizer (leaf) so toggling it never re-renders/re-measures the deck.
+  deckMoving: false,
+  setDeckMoving: (v) => set({ deckMoving: v }),
 
   open(book) {
     const cur = get().book;

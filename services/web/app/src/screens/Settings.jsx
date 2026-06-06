@@ -63,10 +63,12 @@ export default function Settings({ setPage }) {
   return (
     <main className="flex-1 overflow-y-auto">
       <header className="px-5 sm:px-8 pt-6 sm:pt-8 pb-5 border-b border-border">
-        <h1 className="font-body font-bold text-2xl sm:text-3xl text-foreground">Settings</h1>
+        <div className="max-w-2xl mx-auto">
+          <h1 className="font-body font-bold text-2xl sm:text-3xl text-foreground">Settings</h1>
+        </div>
       </header>
 
-      <div className="p-5 sm:p-8 pb-24 md:pb-8 max-w-2xl space-y-5">
+      <div className="p-5 sm:p-8 pb-24 md:pb-8 max-w-2xl mx-auto space-y-5">
         <Card title="Appearance">
           <Row label="Theme" hint="System follows your device.">
             <Segmented value={theme} onChange={pickTheme}

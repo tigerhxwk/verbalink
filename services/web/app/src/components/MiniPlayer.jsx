@@ -10,7 +10,7 @@ export default function MiniPlayer() {
 
   return (
     <motion.div initial={{ y: 90 }} animate={{ y: 0 }} exit={{ y: 90 }} transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-      className="fixed bottom-14 md:bottom-0 inset-x-0 z-40 bg-card/90 backdrop-blur border-t border-border">
+      className="fixed bottom-14 md:bottom-0 left-0 right-0 md:left-56 z-40 bg-card/90 backdrop-blur border-t border-border">
       <div className="h-0.5 bg-border"><div className="h-full bg-primary" style={{ width: pct + '%' }} /></div>
       <div className="flex items-center gap-3 px-4 py-2.5 cursor-pointer" onClick={expand} title="Expand player">
         <div className="w-10 h-10 rounded-md flex items-center justify-center shrink-0" style={{ background: bookGradient(book.title) }}>

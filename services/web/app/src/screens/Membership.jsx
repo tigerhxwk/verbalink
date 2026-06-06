@@ -21,6 +21,7 @@ export default function Membership({ setPage }) {
   return (
     <main className="flex-1 overflow-y-auto">
       <header className="px-5 sm:px-8 pt-6 sm:pt-8 pb-5 border-b border-border">
+       <div className="max-w-5xl mx-auto">
         {setPage && (
           <button onClick={() => setPage('settings')} className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground mb-2 transition">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -29,9 +30,10 @@ export default function Membership({ setPage }) {
         )}
         <h1 className="font-body font-bold text-2xl sm:text-3xl text-foreground">Membership</h1>
         <p className="text-sm text-muted-foreground mt-1">Your plan determines voice quality, monthly credits and processing priority.</p>
+       </div>
       </header>
 
-      <div className="p-5 sm:p-8 pb-24 md:pb-8">
+      <div className="p-5 sm:p-8 pb-24 md:pb-8 max-w-5xl mx-auto">
         <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
           {TIERS.map((t) => {
             const isCurrent = t.id === current;

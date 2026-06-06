@@ -42,6 +42,23 @@ function Equalizer() {
   );
 }
 
+// Cover + equalizer as a leaf: subscribes to playing/deckMoving itself, so pausing the loops
+// while the deck slides re-renders ONLY this — never the deck (which would re-measure → 2-step).
+function Cover({ book }) {
+  const playing = usePlayer((s) => s.playing);
+  const moving = usePlayer((s) => s.deckMoving);
+  const live = playing && !moving;
+  return (
+    <motion.div animate={{ scale: live ? [1, 1.015, 1] : 1 }}
+      transition={{ duration: 3.6, repeat: live ? Infinity : 0, ease: 'easeInOut' }}
+      className="relative w-40 h-40 rounded-2xl flex items-center justify-center mb-5 shadow-xl border border-border"
+      style={{ background: bookGradient(book.title) }}>
+      <span className="font-display text-6xl text-white/90 select-none">{bookInitial(book.title)}</span>
+      {live && <Equalizer />}
+    </motion.div>
+  );
+}
+
 // Isolated `cur` subscriber so the rest of the deck doesn't re-render ~4×/sec.
 function SeekRow({ dur, seekTo }) {
   const cur = usePlayer((s) => s.cur);
@@ -89,7 +106,6 @@ export default function Player() {
   const [showTranscript, setShowTranscript] = useState(false);
   const [blur, setBlur] = useState(true);
   const [clarifySeg, setClarifySeg] = useState(null);
-  const [moving, setMoving] = useState(false); // true while the deck slides aside — pause inner loops
   const winRef = useRef({ start: 0, end: 0, hasPrev: false, hasNext: false });
   const loadingRef = useRef(false);
 
@@ -136,7 +152,8 @@ export default function Player() {
       style={{ backgroundColor: 'color-mix(in srgb, var(--background) 60%, transparent)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
 
       <motion.div layout transition={{ type: 'spring', stiffness: 300, damping: 34 }}
-        onLayoutAnimationStart={() => setMoving(true)} onLayoutAnimationComplete={() => setMoving(false)}
+        onLayoutAnimationStart={() => usePlayer.getState().setDeckMoving(true)}
+        onLayoutAnimationComplete={() => usePlayer.getState().setDeckMoving(false)}
         className={cn('rounded-2xl bg-card border border-border shadow-2xl px-6 pt-4 pb-6',
           showTranscript ? 'absolute left-6 top-6 w-full max-w-xs z-10 hidden lg:block' : 'w-full max-w-md')}>
 
@@ -165,15 +182,7 @@ export default function Player() {
         </div>
 
         <div className="flex flex-col items-center">
-          {/* pause the cover/equalizer loops while the deck is sliding — avoids competing with
-              Framer's layout scale-correction and keeps the move buttery */}
-          <motion.div animate={{ scale: (playing && !moving) ? [1, 1.015, 1] : 1 }}
-            transition={{ duration: 3.6, repeat: (playing && !moving) ? Infinity : 0, ease: 'easeInOut' }}
-            className="relative w-40 h-40 rounded-2xl flex items-center justify-center mb-5 shadow-xl border border-border"
-            style={{ background: bookGradient(book.title) }}>
-            <span className="font-display text-6xl text-white/90 select-none">{bookInitial(book.title)}</span>
-            {playing && !moving && <Equalizer />}
-          </motion.div>
+          <Cover book={book} />
           <h2 className="font-body font-bold text-xl text-center text-foreground leading-tight">{book.title}</h2>
           <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2 mb-5">
             <span>{langName(book.source_lang)}</span>

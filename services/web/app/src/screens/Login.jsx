@@ -46,13 +46,45 @@ export default function Login() {
     <div className="min-h-full flex items-center justify-center p-5 bg-[var(--background)]">
       <ThemeLamp className="fixed top-4 right-5" />
 
-      <motion.div
-        animate={ticket}
-        initial={{ opacity: 0, y: 24, scale: 0.96 }}
-        className="relative w-[360px] rounded-md overflow-hidden bg-card text-card-foreground
-                   shadow-[0_30px_80px_rgba(0,0,0,0.55)] border border-border">
-        <div className="ticket-rail left-[-7px]" aria-hidden="true" />
-        <div className="ticket-rail right-[-7px]" aria-hidden="true" />
+      <div className="w-full max-w-5xl flex flex-col lg:flex-row items-center justify-center gap-10 lg:gap-20">
+
+        {/* Mission statement — desktop only, alongside the ticket (left) */}
+        <motion.div
+          initial={{ opacity: 0, x: -18 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ type: 'spring', stiffness: 280, damping: 26, delay: 0.1 }}
+          className="hidden lg:flex flex-col flex-1 max-w-md">
+          <div className="flex items-center gap-2.5 mb-7">
+            <Logo className="w-8 h-8 shrink-0" />
+            <span className="font-display text-2xl text-foreground">Verbalink</span>
+          </div>
+          <h2 className="font-display text-[2rem] leading-[1.18] text-foreground mb-5">
+            A story shouldn&rsquo;t ask for perfect eyesight, a shared language, or a free evening before it gives itself to you.
+          </h2>
+          <p className="text-muted-foreground leading-relaxed mb-4">
+            Verbalink exists to close that gap — pairing voice with text so every reader can meet a book on their own terms.
+          </p>
+          <p className="text-muted-foreground leading-relaxed mb-7">
+            Listen and follow along. Pause on a sentence to see it translated or explained. Ask what a passage means and talk it through.
+          </p>
+          <p className="font-display text-xl text-primary leading-snug">
+            Reading made accessible, and language made learnable — one sentence at a time.
+          </p>
+        </motion.div>
+
+        {/* Right column: mobile tagline above the ticket */}
+        <div className="flex flex-col items-center">
+          <p className="lg:hidden font-display text-2xl text-center text-foreground mb-7 px-4 max-w-[340px]">
+            Where listening becomes understanding.
+          </p>
+
+          <motion.div
+            animate={ticket}
+            initial={{ opacity: 0, y: 24, scale: 0.96 }}
+            className="relative w-[360px] max-w-full rounded-md overflow-hidden bg-card text-card-foreground
+                       shadow-[0_30px_80px_rgba(0,0,0,0.55)] border border-border">
+            <div className="ticket-rail left-[-7px]" aria-hidden="true" />
+            <div className="ticket-rail right-[-7px]" aria-hidden="true" />
 
         {/* stub */}
         <div className="flex items-center justify-between px-7 py-3 border-b border-dashed border-border"
@@ -102,7 +134,9 @@ export default function Login() {
             {stamp.kind === 'ok' ? 'Admitted' : 'Denied'}
           </motion.div>
         )}
-      </motion.div>
+          </motion.div>
+        </div>
+      </div>
     </div>
   );
 }
